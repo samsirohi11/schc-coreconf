@@ -209,9 +209,7 @@ impl SchcCoreconfManager {
 
     /// Check if rule learning has suggestions ready
     pub fn has_suggestion(&self) -> bool {
-        self.learner
-            .as_ref()
-            .map_or(false, |l| l.ready_to_suggest())
+        self.learner.as_ref().is_some_and(|l| l.ready_to_suggest())
     }
 
     /// Get suggested rule improvement based on observed traffic
@@ -221,7 +219,7 @@ impl SchcCoreconfManager {
     /// endpoints via CORECONF.
     pub fn suggest_rule(&mut self) -> Option<Rule> {
         // Get the base rule first (before mutable borrow of learner)
-        let base_rule = self.active_rules().first()?.clone().clone();
+        let base_rule = self.active_rules().first().cloned()?.clone();
 
         // Now we can borrow learner mutably
         let learner = self.learner.as_mut()?;
@@ -249,7 +247,7 @@ impl SchcCoreconfManager {
             .app_rules
             .iter()
             .find(|r| r.rule_id == rule_id && r.rule_id_length == rule_id_length)
-            .ok_or_else(|| Error::RuleNotFound(rule_id, rule_id_length))?;
+            .ok_or(Error::RuleNotFound(rule_id, rule_id_length))?;
 
         schc_rule_to_yang(rule)
     }

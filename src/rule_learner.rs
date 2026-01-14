@@ -5,7 +5,7 @@
 //! refinement: start with a basic rule, then add fields as patterns emerge.
 
 use schc::field_id::FieldId;
-use schc::rule::{CompressionAction, Field, MatchingOperator, Rule};
+use schc::rule::{CompressionAction, MatchingOperator, Rule};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
@@ -250,6 +250,7 @@ fn bytes_to_json_value(bytes: &[u8]) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use schc::rule::Field;
 
     fn create_test_field(fid: FieldId, cda: CompressionAction) -> Field {
         Field {

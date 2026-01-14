@@ -3,7 +3,7 @@
 //! Handles bidirectional conversion following RFC 9363 YANG model.
 
 use schc::field_id::FieldId;
-use schc::rule::{CompressionAction, Field, MatchingOperator, Rule};
+use schc::rule::{Field, MatchingOperator, Rule};
 use serde_json::{json, Value};
 
 use crate::error::{Error, Result};
@@ -80,7 +80,7 @@ fn yang_entry_to_field(entry: &Value) -> Result<Field> {
     // Apply MSB value if present
     let mo_val = if let Some(mo_values) = entry["matching-operator-value"].as_array() {
         if let Some(first) = mo_values.first() {
-            first["value"].as_str().and_then(|s| base64_decode_u8(s))
+            first["value"].as_str().and_then(base64_decode_u8)
         } else {
             None
         }
@@ -166,7 +166,7 @@ pub fn schc_rule_to_yang(rule: &Rule) -> Result<Value> {
     let entries: Vec<Value> = rule
         .compression
         .iter()
-        .map(|field| field_to_yang_entry(field))
+        .map(field_to_yang_entry)
         .collect::<Result<Vec<_>>>()?;
 
     let mut result = json!({
@@ -204,7 +204,7 @@ fn field_to_yang_entry(field: &Field) -> Result<Value> {
                 "index": 0,
                 "value": base64::Engine::encode(
                     &base64::engine::general_purpose::STANDARD,
-                    &[val]
+                    [val]
                 )
             }]);
         }
@@ -307,6 +307,7 @@ fn base64_decode_u8(s: &str) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use schc::rule::CompressionAction;
 
     #[test]
     fn test_yang_to_schc_basic() {
