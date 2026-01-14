@@ -1,0 +1,48 @@
+[package]
+name = "schc-coreconf"
+version = "0.1.0"
+edition = "2021"
+description = "CoRECONF-based rule management for SCHC compression"
+license = "MIT"
+repository = "https://github.com/samsirohi11/schc-coreconf"
+
+[dependencies]
+# SCHC compression engine (submodule at ./schc)
+# Package is schc_r_c but lib exports as "schc"
+schc = { path = "./schc", package = "schc_r_c" }
+
+# CoRECONF library (submodule at ./coreconf)
+rust-coreconf = { path = "./coreconf" }
+
+# CoAP transport
+coap-lite = "0.13"
+tokio = { version = "1", features = ["full", "time"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ciborium = "0.2"
+base64 = "0.22"
+hex = "0.4"
+
+# Logging
+log = "0.4"
+env_logger = "0.11"
+
+# Error handling
+thiserror = "2"
+
+[dev-dependencies]
+tokio-test = "0.4"
+
+[[example]]
+name = "schc_coap_server"
+path = "examples/schc_coap_server.rs"
+
+[[example]]
+name = "schc_coap_client"
+path = "examples/schc_coap_client.rs"
+
+[[example]]
+name = "progressive_rule_demo"
+path = "examples/progressive_rule_demo.rs"
