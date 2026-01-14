@@ -1,0 +1,6 @@
+[submodule "schc"]
+	path = schc
+	url = https://github.com/samsirohi11/schc_r_c
+[submodule "coreconf"]
+	path = coreconf
+	url = https://github.com/samsirohi11/rustconf
