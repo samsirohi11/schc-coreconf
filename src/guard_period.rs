@@ -12,8 +12,9 @@ use std::time::{Duration, Instant};
 pub enum RuleState {
     /// Rule is active and can be used for compression
     Active,
-    /// Rule is pending activation (in guard period)
-    Pending {
+    /// Rule is candidate (pending activation, in guard period)
+    /// Per draft-toutain-schc-coreconf-management terminology
+    Candidate {
         /// When the rule will become active
         activation_time: Instant,
     },
@@ -79,17 +80,18 @@ impl GuardPeriodManager {
     /// Schedule a new rule for activation after the guard period
     ///
     /// The rule will transition to Active state after the guard period elapses.
+    /// During the guard period, the rule is in Candidate state per the draft.
     pub fn schedule_activation(&mut self, rule_id: u32, rule_id_length: u8) {
         let activation_time = Instant::now() + self.guard_period();
         log::info!(
-            "Scheduling rule {}/{} for activation in {:?}",
+            "Scheduling rule {}/{} for activation in {:?} (candidate)",
             rule_id,
             rule_id_length,
             self.guard_period()
         );
         self.rule_states.insert(
             (rule_id, rule_id_length),
-            RuleState::Pending { activation_time },
+            RuleState::Candidate { activation_time },
         );
     }
 
@@ -120,7 +122,7 @@ impl GuardPeriodManager {
     pub fn is_rule_active(&self, rule_id: u32, rule_id_length: u8) -> bool {
         match self.rule_states.get(&(rule_id, rule_id_length)) {
             Some(RuleState::Active) => true,
-            Some(RuleState::Pending { activation_time }) => Instant::now() >= *activation_time,
+            Some(RuleState::Candidate { activation_time }) => Instant::now() >= *activation_time,
             Some(RuleState::Deprecated { .. }) => true, // Still usable until removed
             None => true, // Unknown rules are assumed active (for initial rules)
         }
@@ -131,10 +133,10 @@ impl GuardPeriodManager {
         self.rule_states.get(&(rule_id, rule_id_length))
     }
 
-    /// Get time until a pending rule becomes active
+    /// Get time until a candidate rule becomes active
     pub fn time_until_active(&self, rule_id: u32, rule_id_length: u8) -> Option<Duration> {
         match self.rule_states.get(&(rule_id, rule_id_length)) {
-            Some(RuleState::Pending { activation_time }) => {
+            Some(RuleState::Candidate { activation_time }) => {
                 let now = Instant::now();
                 if now < *activation_time {
                     Some(*activation_time - now)
@@ -157,7 +159,7 @@ impl GuardPeriodManager {
 
         for (&(rule_id, rule_id_length), state) in self.rule_states.iter_mut() {
             match state {
-                RuleState::Pending { activation_time } if now >= *activation_time => {
+                RuleState::Candidate { activation_time } if now >= *activation_time => {
                     *state = RuleState::Active;
                     log::info!(
                         "Rule {}/{} activated after guard period",
@@ -189,7 +191,7 @@ impl GuardPeriodManager {
             .iter()
             .filter(|(_, state)| match state {
                 RuleState::Active => true,
-                RuleState::Pending { activation_time } => now >= *activation_time,
+                RuleState::Candidate { activation_time } => now >= *activation_time,
                 RuleState::Deprecated { expiry_time } => now < *expiry_time,
             })
             .map(|(&key, _)| key)

@@ -271,6 +271,158 @@ impl SchcCoreconfManager {
     pub fn learning_stats(&self) -> Option<String> {
         self.learner.as_ref().map(|l| l.pattern_summary())
     }
+
+    // ========================================================================
+    // RPC Operations (per draft-toutain-schc-coreconf-management)
+    // ========================================================================
+
+    /// Duplicate a rule (RPC per draft-toutain-schc-coreconf-management)
+    ///
+    /// This is the RECOMMENDED method for adding new rules. It copies an existing
+    /// rule ("from") to a new rule ID ("to") and optionally applies modifications.
+    ///
+    /// # Arguments
+    /// * `from` - (rule_id, rule_id_length) of source rule
+    /// * `to` - (rule_id, rule_id_length) of destination rule
+    /// * `modifications` - Optional YANG JSON with iPATCH-style modifications
+    ///
+    /// # Errors
+    /// Returns error if:
+    /// - Source rule doesn't exist
+    /// - Target conflicts with M-Rule range
+    /// - Modifications fail to apply
+    ///
+    /// Per draft spec, this operation is atomic - if any step fails, no changes occur.
+    pub fn duplicate_rule(
+        &mut self,
+        from: (u32, u8),
+        to: (u32, u8),
+        modifications: Option<&Value>,
+    ) -> Result<()> {
+        // Validate not modifying M-Rules
+        self.m_rules.validate_modification(to.0)?;
+
+        // Find source rule
+        let source = self
+            .app_rules
+            .iter()
+            .find(|r| r.rule_id == from.0 && r.rule_id_length == from.1)
+            .ok_or_else(|| Error::RuleNotFound(from.0, from.1))?
+            .clone();
+
+        // Check target doesn't already exist
+        if self
+            .app_rules
+            .iter()
+            .any(|r| r.rule_id == to.0 && r.rule_id_length == to.1)
+        {
+            return Err(Error::Conversion(format!(
+                "Rule {}/{} already exists",
+                to.0, to.1
+            )));
+        }
+
+        // Create new rule with updated ID
+        let mut new_rule = source.clone();
+        new_rule.rule_id = to.0;
+        new_rule.rule_id_length = to.1;
+        new_rule.comment = Some(format!("Derived from {}/{}", from.0, from.1));
+
+        // Apply modifications if provided
+        if let Some(mods) = modifications {
+            new_rule = Self::apply_rule_modifications(new_rule, mods)?;
+        }
+
+        log::info!(
+            "Duplicating rule {}/{} -> {}/{}",
+            from.0,
+            from.1,
+            to.0,
+            to.1
+        );
+
+        // Provision the new rule
+        self.provision_rule(new_rule)?;
+
+        Ok(())
+    }
+
+    /// Apply iPATCH-style modifications to a rule
+    fn apply_rule_modifications(mut rule: Rule, mods: &Value) -> Result<Rule> {
+        // Handle field-level modifications
+        if let Some(entries) = mods.get("entry").and_then(|e| e.as_array()) {
+            for entry_mod in entries {
+                if let Some(fid_str) = entry_mod.get("field-id").and_then(|f| f.as_str()) {
+                    // Find matching field in rule
+                    use crate::identities::yang_fid_to_schc;
+                    if let Ok(fid) = yang_fid_to_schc(fid_str) {
+                        if let Some(field) = rule.compression.iter_mut().find(|f| f.fid == fid) {
+                            // Apply target-value modification
+                            if let Some(tv) = entry_mod.get("target-value") {
+                                field.tv = Some(tv.clone());
+                            }
+                            // Apply matching-operator modification
+                            if let Some(mo_str) =
+                                entry_mod.get("matching-operator").and_then(|m| m.as_str())
+                            {
+                                use crate::identities::yang_mo_to_schc;
+                                if let Ok(mo) = yang_mo_to_schc(mo_str) {
+                                    field.mo = mo;
+                                }
+                            }
+                            // Apply CDA modification
+                            if let Some(cda_str) =
+                                entry_mod.get("comp-decomp-action").and_then(|c| c.as_str())
+                            {
+                                use crate::identities::yang_cda_to_schc;
+                                if let Ok(cda) = yang_cda_to_schc(cda_str) {
+                                    field.cda = cda;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(rule)
+    }
+
+    // ========================================================================
+    // Binary Tree Rule ID Helpers (per draft-toutain-schc-coreconf-management)
+    // ========================================================================
+
+    /// Check if a rule derivation follows binary tree structure
+    ///
+    /// Per the draft: "newly created rules SHOULD follow a binary tree structure.
+    /// For instance, a rule identified as 8/4 may be duplicated as either 8/5 or 18/5."
+    ///
+    /// Valid derivations extend the rule ID by 1 bit:
+    /// - Same prefix with 0 appended: (8/4) -> (8/5) means 1000 -> 01000
+    /// - Same prefix with 1 appended: (8/4) -> (24/5) means 1000 -> 11000
+    pub fn is_valid_binary_tree_derivation(from: (u32, u8), to: (u32, u8)) -> bool {
+        // New rule must be exactly 1 bit longer
+        if to.1 != from.1 + 1 {
+            return false;
+        }
+
+        // The new rule ID should be either:
+        // - from.0 (append 0 bit) -> value stays same, length increases
+        // - from.0 | (1 << from.1) (append 1 bit) -> set new MSB
+        let extended_with_0 = from.0;
+        let extended_with_1 = from.0 | (1 << from.1);
+
+        to.0 == extended_with_0 || to.0 == extended_with_1
+    }
+
+    /// Get valid binary tree derivation options for a rule
+    pub fn get_derivation_options(from: (u32, u8)) -> [(u32, u8); 2] {
+        let new_length = from.1 + 1;
+        [
+            (from.0, new_length),                 // Append 0
+            (from.0 | (1 << from.1), new_length), // Append 1
+        ]
+    }
 }
 
 #[cfg(test)]

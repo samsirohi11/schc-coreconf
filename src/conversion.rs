@@ -1,6 +1,7 @@
 //! Conversion between YANG/JSON and SCHC Rule structures
 //!
-//! Handles bidirectional conversion following RFC 9363 YANG model.
+//! Handles bidirectional conversion following RFC 9363 YANG model
+//! with extensions from draft-toutain-schc-coreconf-management.
 
 use schc::field_id::FieldId;
 use schc::rule::{Field, MatchingOperator, Rule};
@@ -11,6 +12,73 @@ use crate::identities::{
     schc_cda_to_yang, schc_fid_to_yang, schc_mo_to_yang, yang_cda_to_schc, yang_fid_to_schc,
     yang_mo_to_schc,
 };
+
+/// Rule status per draft-toutain-schc-coreconf-management
+///
+/// A rule can be either active (usable for compression) or candidate
+/// (pending activation during guard period).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RuleStatus {
+    #[default]
+    Active,
+    Candidate,
+}
+
+impl RuleStatus {
+    /// Convert from YANG identity string
+    pub fn from_yang(s: &str) -> Self {
+        let status = s
+            .strip_prefix("schc:")
+            .or_else(|| s.strip_prefix("ietf-schc:"))
+            .unwrap_or(s);
+        match status {
+            "status-candidate" => RuleStatus::Candidate,
+            _ => RuleStatus::Active,
+        }
+    }
+
+    /// Convert to YANG identity string
+    pub fn to_yang(self) -> &'static str {
+        match self {
+            RuleStatus::Active => "status-active",
+            RuleStatus::Candidate => "status-candidate",
+        }
+    }
+}
+
+/// Rule nature per draft-toutain-schc-coreconf-management
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RuleNature {
+    #[default]
+    Compression,
+    /// Management rules (M-Rules) for CORECONF traffic
+    Management,
+    Fragmentation,
+}
+
+impl RuleNature {
+    /// Convert from YANG identity string
+    pub fn from_yang(s: &str) -> Self {
+        let nature = s
+            .strip_prefix("schc:")
+            .or_else(|| s.strip_prefix("ietf-schc:"))
+            .unwrap_or(s);
+        match nature {
+            "nature-management" => RuleNature::Management,
+            "nature-fragmentation" => RuleNature::Fragmentation,
+            _ => RuleNature::Compression,
+        }
+    }
+
+    /// Convert to YANG identity string
+    pub fn to_yang(self) -> &'static str {
+        match self {
+            RuleNature::Compression => "nature-compression",
+            RuleNature::Management => "nature-management",
+            RuleNature::Fragmentation => "nature-fragmentation",
+        }
+    }
+}
 
 /// Convert YANG JSON representation to SCHC Rule
 ///
@@ -33,7 +101,21 @@ use crate::identities::{
 ///   ]
 /// }
 /// ```
+/// Extended rule metadata per draft-toutain-schc-coreconf-management
+#[derive(Debug, Clone, Default)]
+pub struct RuleMetadata {
+    pub status: RuleStatus,
+    pub nature: RuleNature,
+}
+
+/// Convert YANG JSON representation to SCHC Rule
 pub fn yang_to_schc_rule(yang_json: &Value) -> Result<Rule> {
+    let (rule, _) = yang_to_schc_rule_with_metadata(yang_json)?;
+    Ok(rule)
+}
+
+/// Convert YANG JSON to SCHC Rule with extended metadata
+pub fn yang_to_schc_rule_with_metadata(yang_json: &Value) -> Result<(Rule, RuleMetadata)> {
     let rule_id = yang_json["rule-id-value"]
         .as_u64()
         .ok_or_else(|| Error::Conversion("Missing rule-id-value".into()))? as u32;
@@ -45,6 +127,18 @@ pub fn yang_to_schc_rule(yang_json: &Value) -> Result<Rule> {
 
     let comment = yang_json["comment"].as_str().map(String::from);
 
+    // Parse rule-status (draft-toutain extension)
+    let status = yang_json["rule-status"]
+        .as_str()
+        .map(RuleStatus::from_yang)
+        .unwrap_or_default();
+
+    // Parse rule-nature (draft-toutain extension)
+    let nature = yang_json["rule-nature"]
+        .as_str()
+        .map(RuleNature::from_yang)
+        .unwrap_or_default();
+
     let entries = yang_json["entry"]
         .as_array()
         .ok_or_else(|| Error::Conversion("Missing entry array".into()))?;
@@ -55,12 +149,16 @@ pub fn yang_to_schc_rule(yang_json: &Value) -> Result<Rule> {
         compression.push(field);
     }
 
-    Ok(Rule {
+    let rule = Rule {
         rule_id,
         rule_id_length,
         comment,
         compression,
-    })
+    };
+
+    let metadata = RuleMetadata { status, nature };
+
+    Ok((rule, metadata))
 }
 
 /// Convert a YANG entry to SCHC Field
@@ -163,6 +261,11 @@ fn parse_yang_target_value(tv_list: &Value, _fid: FieldId) -> Result<Option<Valu
 
 /// Convert SCHC Rule to YANG JSON representation
 pub fn schc_rule_to_yang(rule: &Rule) -> Result<Value> {
+    schc_rule_to_yang_with_metadata(rule, &RuleMetadata::default())
+}
+
+/// Convert SCHC Rule to YANG JSON with extended metadata
+pub fn schc_rule_to_yang_with_metadata(rule: &Rule, metadata: &RuleMetadata) -> Result<Value> {
     let entries: Vec<Value> = rule
         .compression
         .iter()
@@ -172,7 +275,8 @@ pub fn schc_rule_to_yang(rule: &Rule) -> Result<Value> {
     let mut result = json!({
         "rule-id-value": rule.rule_id,
         "rule-id-length": rule.rule_id_length,
-        "rule-nature": "nature-compression",
+        "rule-status": metadata.status.to_yang(),
+        "rule-nature": metadata.nature.to_yang(),
         "entry": entries,
     });
 

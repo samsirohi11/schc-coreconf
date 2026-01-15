@@ -40,7 +40,10 @@ mod m_rules;
 mod manager;
 mod rule_learner;
 
-pub use conversion::{schc_rule_to_yang, yang_to_schc_rule};
+pub use conversion::{
+    schc_rule_to_yang, schc_rule_to_yang_with_metadata, yang_to_schc_rule,
+    yang_to_schc_rule_with_metadata, RuleMetadata, RuleNature, RuleStatus,
+};
 pub use error::{Error, Result};
 pub use guard_period::{GuardPeriodManager, RuleState};
 pub use identities::{schc_fid_to_yang, yang_cda_to_schc, yang_fid_to_schc, yang_mo_to_schc};

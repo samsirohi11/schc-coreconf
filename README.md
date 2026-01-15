@@ -2,12 +2,15 @@
 
 CoRECONF-based rule management for SCHC (Static Context Header Compression).
 
-This crate bridges SCHC compression with CoRECONF, enabling remote management of SCHC rules via CoAP/CBOR using YANG data models (RFC 9363).
+This crate bridges SCHC compression with CoRECONF, enabling remote management of SCHC rules via CoAP/CBOR using YANG data models per [draft-toutain-schc-coreconf-management](https://datatracker.ietf.org/doc/draft-toutain-schc-coreconf-management/).
 
 ## Features
 
-- **M-Rules**: Pre-provisioned rules for compressing CORECONF management traffic
+- **M-Rules (M1-M4)**: Pre-provisioned rules for compressing CORECONF management traffic with CoAP layer support
 - **Guard Period**: RTT-based synchronization for rule activation across high-latency links
+- **Rule Status**: Active/Candidate states per draft specification
+- **Duplicate-Rule RPC**: Recommended method for deriving new rules from existing ones
+- **Binary Tree Rule IDs**: Helper functions for proper rule derivation structure
 - **Progressive Learning**: Observes traffic patterns and suggests optimized rules
 - **RFC 9363 Compliance**: YANG identity mappings for SCHC field IDs, MOs, and CDAs
 
@@ -75,6 +78,7 @@ if manager.has_suggestion() {
 
 ## References
 
+- [draft-toutain-schc-coreconf-management](https://datatracker.ietf.org/doc/draft-toutain-schc-coreconf-management/) - CORECONF Rule management for SCHC
 - [RFC 9363](https://datatracker.ietf.org/doc/rfc9363/) - YANG Data Model for SCHC
 - [RFC 8724](https://datatracker.ietf.org/doc/rfc8724/) - SCHC Framework
 - [draft-ietf-core-comi](https://datatracker.ietf.org/doc/draft-ietf-core-comi/) - CoRECONF
