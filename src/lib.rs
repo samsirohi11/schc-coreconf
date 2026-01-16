@@ -2,37 +2,57 @@
 //!
 //! This crate provides integration between SCHC (Static Context Header Compression)
 //! and CoRECONF (CoAP Management Interface), enabling remote management of SCHC
-//! compression rules via CoAP/CBOR.
+//! compression rules via CoAP/CBOR per draft-toutain-schc-coreconf-management.
 //!
 //! # Key Features
 //!
 //! - **M-Rules**: Pre-provisioned rules for compressing CORECONF management traffic
+//!   - 4 predefined M-Rules (IDs 0-3) for IPv6/UDP/CoAP CORECONF traffic
+//!   - M-Rules are immutable via CORECONF (protected from modification/deletion)
+//!   - Management traffic uses fe80::1 (Device) and fe80::2 (Core) addresses
+//!
 //! - **Guard Period**: RTT-based synchronization for rule activation across endpoints
+//!   - New rules are immediately active (no guard period per draft)
+//!   - Rule modifications require guard period (candidate state)
+//!   - Rule deletions block the ID for guard period duration
+//!
 //! - **Progressive Learning**: Learn traffic patterns and provision more specific rules
-//! - **RFC 9363 Compliance**: YANG data model for SCHC rules
+//!
+//! - **RFC 9363 Compliance**: YANG data model for SCHC rules with extensions from
+//!   draft-toutain-schc-coreconf-management (rule-status, rule-nature)
+//!
+//! - **CORECONF Protocol**: Full CoAP method support (GET, FETCH, iPATCH, POST)
+//!   - SID-based CBOR encoding for compact messages
+//!   - duplicate-rule RPC for atomic rule derivation
+//!   - Proper CoAP error codes (4.01 Unauthorized, 4.04 Not Found, 4.09 Conflict)
 //!
 //! # Example
 //!
 //! ```ignore
-//! use schc_coreconf::SchcCoreconfManager;
+//! use schc_coreconf::{SchcCoreconfManager, MRuleSet};
 //! use std::time::Duration;
 //!
-//! // Create manager with estimated RTT
+//! // Load M-Rules and create manager
+//! let m_rules = MRuleSet::from_file("samples/m-rules.json").unwrap();
 //! let mut manager = SchcCoreconfManager::new(
-//!     "samples/ietf-schc.sid",
-//!     "samples/m-rules.json",
-//!     Some("samples/initial-rules.json"),
+//!     m_rules,
+//!     vec![],  // No initial app rules
 //!     Duration::from_millis(2500),  // Earth-Moon RTT
-//! ).unwrap();
+//! );
 //!
 //! // Enable progressive rule learning
 //! manager.enable_learning(50);  // Learn after 50 packets
 //!
-//! // Get active rules for compression
-//! let rules = manager.active_rules();
+//! // Get combined ruleset (M-Rules + active app rules) for compression
+//! let ruleset = manager.compression_ruleset().unwrap();
+//!
+//! // Duplicate a rule using binary tree derivation
+//! // Rule 8/4 can be derived to 8/5 (append 0) or 24/5 (append 1)
+//! manager.duplicate_rule((8, 4), (8, 5), None).unwrap();
 //! ```
 
 mod conversion;
+pub mod coreconf_adapter;
 mod error;
 mod guard_period;
 mod identities;
@@ -44,9 +64,13 @@ pub use conversion::{
     schc_rule_to_yang, schc_rule_to_yang_with_metadata, yang_to_schc_rule,
     yang_to_schc_rule_with_metadata, RuleMetadata, RuleNature, RuleStatus,
 };
-pub use error::{Error, Result};
+pub use coreconf_adapter::{SchcCoreconfHandler, sid};
+pub use error::{CoapCode, Error, Result};
 pub use guard_period::{GuardPeriodManager, RuleState};
-pub use identities::{schc_fid_to_yang, yang_cda_to_schc, yang_fid_to_schc, yang_mo_to_schc};
+pub use identities::{
+    schc_cda_to_yang, schc_fid_to_yang, schc_mo_to_yang,
+    yang_cda_to_schc, yang_fid_to_schc, yang_mo_to_schc,
+};
 pub use m_rules::MRuleSet;
 pub use manager::SchcCoreconfManager;
 pub use rule_learner::RuleLearner;

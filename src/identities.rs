@@ -57,6 +57,29 @@ pub fn yang_fid_to_schc(yang_fid: &str) -> Result<FieldId> {
         "fid-coap-mid" => Ok(FieldId::CoapMid),
         "fid-coap-token" => Ok(FieldId::CoapToken),
 
+        // CoAP Option fields
+        // These are used in M-Rules for CORECONF traffic
+        "fid-coap-option-if-match" => Ok(FieldId::CoapIfMatch),
+        "fid-coap-option-uri-host" => Ok(FieldId::CoapUriHost),
+        "fid-coap-option-etag" => Ok(FieldId::CoapEtag),
+        "fid-coap-option-if-none-match" => Ok(FieldId::CoapIfNoneMatch),
+        "fid-coap-option-observe" => Ok(FieldId::CoapObserve),
+        "fid-coap-option-uri-port" => Ok(FieldId::CoapUriPort),
+        "fid-coap-option-location-path" => Ok(FieldId::CoapLocationPath),
+        "fid-coap-option-uri-path" => Ok(FieldId::CoapUriPath),
+        "fid-coap-option-content-format" => Ok(FieldId::CoapContentFormat),
+        "fid-coap-option-max-age" => Ok(FieldId::CoapMaxAge),
+        "fid-coap-option-uri-query" => Ok(FieldId::CoapUriQuery),
+        "fid-coap-option-accept" => Ok(FieldId::CoapAccept),
+        "fid-coap-option-location-query" => Ok(FieldId::CoapLocationQuery),
+        "fid-coap-option-block2" => Ok(FieldId::CoapBlock2),
+        "fid-coap-option-block1" => Ok(FieldId::CoapBlock1),
+        "fid-coap-option-size2" => Ok(FieldId::CoapSize2),
+        "fid-coap-option-proxy-uri" => Ok(FieldId::CoapProxyUri),
+        "fid-coap-option-proxy-scheme" => Ok(FieldId::CoapProxyScheme),
+        "fid-coap-option-size1" => Ok(FieldId::CoapSize1),
+        "fid-coap-option-no-response" => Ok(FieldId::CoapNoResponse),
+
         // QUIC fields
         "fid-quic-first-byte" => Ok(FieldId::QuicFirstByte),
         "fid-quic-version" => Ok(FieldId::QuicVersion),
@@ -122,6 +145,28 @@ pub fn schc_fid_to_yang(fid: FieldId) -> &'static str {
         FieldId::CoapCode => "fid-coap-code",
         FieldId::CoapMid => "fid-coap-mid",
         FieldId::CoapToken => "fid-coap-token",
+
+        // CoAP Option fields
+        FieldId::CoapIfMatch => "fid-coap-option-if-match",
+        FieldId::CoapUriHost => "fid-coap-option-uri-host",
+        FieldId::CoapEtag => "fid-coap-option-etag",
+        FieldId::CoapIfNoneMatch => "fid-coap-option-if-none-match",
+        FieldId::CoapObserve => "fid-coap-option-observe",
+        FieldId::CoapUriPort => "fid-coap-option-uri-port",
+        FieldId::CoapLocationPath => "fid-coap-option-location-path",
+        FieldId::CoapUriPath => "fid-coap-option-uri-path",
+        FieldId::CoapContentFormat => "fid-coap-option-content-format",
+        FieldId::CoapMaxAge => "fid-coap-option-max-age",
+        FieldId::CoapUriQuery => "fid-coap-option-uri-query",
+        FieldId::CoapAccept => "fid-coap-option-accept",
+        FieldId::CoapLocationQuery => "fid-coap-option-location-query",
+        FieldId::CoapBlock2 => "fid-coap-option-block2",
+        FieldId::CoapBlock1 => "fid-coap-option-block1",
+        FieldId::CoapSize2 => "fid-coap-option-size2",
+        FieldId::CoapProxyUri => "fid-coap-option-proxy-uri",
+        FieldId::CoapProxyScheme => "fid-coap-option-proxy-scheme",
+        FieldId::CoapSize1 => "fid-coap-option-size1",
+        FieldId::CoapNoResponse => "fid-coap-option-no-response",
 
         // QUIC fields
         FieldId::QuicFirstByte => "fid-quic-first-byte",

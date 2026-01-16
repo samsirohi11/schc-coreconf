@@ -140,29 +140,93 @@ impl SchcCoreconfManager {
         self.guard_period.set_estimated_rtt(rtt);
     }
 
-    /// Provision a new rule (schedules activation after guard period)
+    /// Provision a new rule or modify an existing one
     ///
-    /// Returns an error if attempting to modify an M-Rule.
+    /// - New rules are immediately active (no guard period)
+    /// - Rule modifications require guard period (candidate state)
+    /// - Blocked rule IDs (during deletion guard period) cannot be re-created
+    ///
+    /// Returns an error if:
+    /// - Attempting to modify an M-Rule
+    /// - Rule ID is blocked during deletion guard period
     pub fn provision_rule(&mut self, rule: Rule) -> Result<()> {
         // Validate not an M-Rule
         self.m_rules.validate_modification(rule.rule_id)?;
 
-        log::info!(
-            "Provisioning rule {}/{} (guard period: {:?})",
-            rule.rule_id,
-            rule.rule_id_length,
-            self.guard_period.guard_period()
-        );
+        // Check if rule ID is blocked (during deletion guard period)
+        if self
+            .guard_period
+            .is_rule_id_blocked(rule.rule_id, rule.rule_id_length)
+        {
+            return Err(Error::RuleIdBlocked(rule.rule_id, rule.rule_id_length));
+        }
 
-        // Schedule activation
-        self.guard_period
-            .schedule_activation(rule.rule_id, rule.rule_id_length);
-
-        // Add to rules (or replace existing)
+        // Check if this is a new rule or modification
         let existing_idx = self
             .app_rules
             .iter()
             .position(|r| r.rule_id == rule.rule_id && r.rule_id_length == rule.rule_id_length);
+
+        let is_modification = existing_idx.is_some();
+
+        if is_modification {
+            // Rule modification - requires guard period per draft
+            log::info!(
+                "Modifying rule {}/{} (guard period: {:?})",
+                rule.rule_id,
+                rule.rule_id_length,
+                self.guard_period.guard_period()
+            );
+            self.guard_period
+                .schedule_activation(rule.rule_id, rule.rule_id_length);
+            self.app_rules[existing_idx.unwrap()] = rule;
+        } else {
+            // New rule creation - immediately active per draft
+            // "Rule creation do not require a Guard period"
+            log::info!(
+                "Creating new rule {}/{} (immediately active)",
+                rule.rule_id,
+                rule.rule_id_length
+            );
+            self.guard_period
+                .mark_active(rule.rule_id, rule.rule_id_length);
+            self.app_rules.push(rule);
+        }
+
+        Ok(())
+    }
+
+    /// Provision a rule with explicit creation/modification mode
+    ///
+    /// Use this for explicit control over guard period behavior.
+    /// - `force_guard_period: true` - Always use guard period (for sync scenarios)
+    /// - `force_guard_period: false` - Use draft behavior (new=immediate, modify=guard)
+    pub fn provision_rule_with_mode(&mut self, rule: Rule, force_guard_period: bool) -> Result<()> {
+        // Validate not an M-Rule
+        self.m_rules.validate_modification(rule.rule_id)?;
+
+        // Check if rule ID is blocked
+        if self
+            .guard_period
+            .is_rule_id_blocked(rule.rule_id, rule.rule_id_length)
+        {
+            return Err(Error::RuleIdBlocked(rule.rule_id, rule.rule_id_length));
+        }
+
+        let existing_idx = self
+            .app_rules
+            .iter()
+            .position(|r| r.rule_id == rule.rule_id && r.rule_id_length == rule.rule_id_length);
+
+        if force_guard_period || existing_idx.is_some() {
+            // Use guard period
+            self.guard_period
+                .schedule_activation(rule.rule_id, rule.rule_id_length);
+        } else {
+            // Immediately active
+            self.guard_period
+                .mark_active(rule.rule_id, rule.rule_id_length);
+        }
 
         if let Some(idx) = existing_idx {
             self.app_rules[idx] = rule;
@@ -180,6 +244,10 @@ impl SchcCoreconfManager {
     }
 
     /// Delete a rule by ID
+    ///
+    /// - Deletion requires Guard Period enforcement
+    /// - During guard period, "a rule with the same ID cannot be created"
+    /// - "SCHC PDU carrying the Rule ID are dropped"
     pub fn delete_rule(&mut self, rule_id: u32, rule_id_length: u8) -> Result<bool> {
         self.m_rules.validate_modification(rule_id)?;
 
@@ -188,13 +256,25 @@ impl SchcCoreconfManager {
             .retain(|r| !(r.rule_id == rule_id && r.rule_id_length == rule_id_length));
 
         if self.app_rules.len() < len_before {
+            // Schedule deprecation - this also blocks the rule ID
             self.guard_period
                 .schedule_deprecation(rule_id, rule_id_length);
-            log::info!("Deleted rule {}/{}", rule_id, rule_id_length);
+            log::info!(
+                "Deleted rule {}/{} (ID blocked for {:?})",
+                rule_id,
+                rule_id_length,
+                self.guard_period.guard_period()
+            );
             Ok(true)
         } else {
             Ok(false)
         }
+    }
+
+    /// Check if a rule ID is currently blocked (during deletion guard period)
+    pub fn is_rule_id_blocked(&self, rule_id: u32, rule_id_length: u8) -> bool {
+        self.guard_period
+            .is_rule_id_blocked(rule_id, rule_id_length)
     }
 
     /// Observe a packet for rule learning
@@ -288,9 +368,11 @@ impl SchcCoreconfManager {
     ///
     /// # Errors
     /// Returns error if:
-    /// - Source rule doesn't exist
-    /// - Target conflicts with M-Rule range
-    /// - Modifications fail to apply
+    /// - Source rule doesn't exist (4.04 Not Found)
+    /// - Target conflicts with M-Rule range (4.01 Unauthorized)
+    /// - Target rule ID is blocked during deletion guard period (4.09 Conflict)
+    /// - Target rule already exists (4.09 Conflict)
+    /// - Modifications fail to apply (4.00 Bad Request)
     ///
     /// Per draft spec, this operation is atomic - if any step fails, no changes occur.
     pub fn duplicate_rule(
@@ -302,12 +384,17 @@ impl SchcCoreconfManager {
         // Validate not modifying M-Rules
         self.m_rules.validate_modification(to.0)?;
 
+        // Check if target rule ID is blocked
+        if self.guard_period.is_rule_id_blocked(to.0, to.1) {
+            return Err(Error::RuleIdBlocked(to.0, to.1));
+        }
+
         // Find source rule
         let source = self
             .app_rules
             .iter()
             .find(|r| r.rule_id == from.0 && r.rule_id_length == from.1)
-            .ok_or_else(|| Error::RuleNotFound(from.0, from.1))?
+            .ok_or(Error::RuleNotFound(from.0, from.1))?
             .clone();
 
         // Check target doesn't already exist
@@ -316,10 +403,7 @@ impl SchcCoreconfManager {
             .iter()
             .any(|r| r.rule_id == to.0 && r.rule_id_length == to.1)
         {
-            return Err(Error::Conversion(format!(
-                "Rule {}/{} already exists",
-                to.0, to.1
-            )));
+            return Err(Error::RuleAlreadyExists(to.0, to.1));
         }
 
         // Create new rule with updated ID
@@ -341,7 +425,7 @@ impl SchcCoreconfManager {
             to.1
         );
 
-        // Provision the new rule
+        // Provision the new rule (will be immediately active as it's a new rule)
         self.provision_rule(new_rule)?;
 
         Ok(())
@@ -458,16 +542,33 @@ mod tests {
     }
 
     #[test]
-    fn test_provision_rule() {
+    fn test_provision_new_rule_immediately_active() {
+        // Per draft: "Rule creation do not require a Guard period"
         let m_rules = MRuleSet::default_ipv6_coap();
-        let mut manager = SchcCoreconfManager::new(m_rules, vec![], Duration::from_millis(10));
+        let mut manager = SchcCoreconfManager::new(m_rules, vec![], Duration::from_millis(100));
 
         let rule = create_test_rule(100);
         manager.provision_rule(rule).unwrap();
 
         assert_eq!(manager.all_rules().len(), 1);
+        // New rules are immediately active - no guard period needed
+        assert_eq!(manager.active_rules().len(), 1);
+    }
 
-        // Wait for guard period
+    #[test]
+    fn test_modify_rule_requires_guard_period() {
+        // Per draft: Rule modification requires guard period
+        let m_rules = MRuleSet::default_ipv6_coap();
+        let initial = vec![create_test_rule(100)];
+        let mut manager = SchcCoreconfManager::new(m_rules, initial, Duration::from_millis(10));
+
+        // Modify existing rule
+        let mut modified = create_test_rule(100);
+        modified.comment = Some("Modified".into());
+        manager.provision_rule(modified).unwrap();
+
+        // Rule should be in candidate state (not active) during guard period
+        // But we check after guard period elapsed
         std::thread::sleep(Duration::from_millis(25));
         manager.tick();
 
@@ -481,6 +582,49 @@ mod tests {
 
         // Should fail - rule 0 is an M-Rule
         let result = manager.provision_rule(create_test_rule(0));
+        assert!(result.is_err());
+
+        // Verify error maps to 4.01 Unauthorized
+        if let Err(e) = result {
+            assert_eq!(e.to_coap_code(), crate::error::CoapCode::UNAUTHORIZED);
+        }
+    }
+
+    #[test]
+    fn test_deletion_blocks_rule_id() {
+        // Per draft: "a rule with the same ID cannot be created" during guard period
+        let m_rules = MRuleSet::default_ipv6_coap();
+        let initial = vec![create_test_rule(100)];
+        let mut manager = SchcCoreconfManager::new(m_rules, initial, Duration::from_millis(50));
+
+        // Delete the rule
+        let deleted = manager.delete_rule(100, 8).unwrap();
+        assert!(deleted);
+
+        // Rule ID should be blocked
+        assert!(manager.is_rule_id_blocked(100, 8));
+
+        // Attempting to create a rule with the same ID should fail
+        let result = manager.provision_rule(create_test_rule(100));
+        assert!(result.is_err());
+
+        // Verify error maps to 4.09 Conflict
+        if let Err(e) = result {
+            assert_eq!(e.to_coap_code(), crate::error::CoapCode::CONFLICT);
+        }
+    }
+
+    #[test]
+    fn test_duplicate_rule_checks_blocked() {
+        let m_rules = MRuleSet::default_ipv6_coap();
+        let initial = vec![create_test_rule(100), create_test_rule(200)];
+        let mut manager = SchcCoreconfManager::new(m_rules, initial, Duration::from_millis(50));
+
+        // Delete rule 200
+        manager.delete_rule(200, 8).unwrap();
+
+        // Try to duplicate rule 100 to blocked ID 200
+        let result = manager.duplicate_rule((100, 8), (200, 8), None);
         assert!(result.is_err());
     }
 

@@ -1,0 +1,310 @@
+{
+  "assignment-range": [
+    {
+      "entry-point": 5000,
+      "size": 500
+    }
+  ],
+  "module-name": "ietf-schc",
+  "module-revision": "2024-01-01",
+  "item": [
+    {
+      "namespace": "module",
+      "identifier": "ietf-schc",
+      "sid": 5000
+    },
+    {
+      "namespace": "identity",
+      "identifier": "/ietf-schc:nature-compression",
+      "sid": 5001
+    },
+    {
+      "namespace": "identity",
+      "identifier": "/ietf-schc:nature-fragmentation",
+      "sid": 5002
+    },
+    {
+      "namespace": "identity",
+      "identifier": "/ietf-schc:nature-management",
+      "sid": 5003
+    },
+    {
+      "namespace": "identity",
+      "identifier": "/ietf-schc:status-active",
+      "sid": 5004
+    },
+    {
+      "namespace": "identity",
+      "identifier": "/ietf-schc:status-candidate",
+      "sid": 5005
+    },
+    {
+      "namespace": "identity",
+      "identifier": "/ietf-schc:di-up",
+      "sid": 5010
+    },
+    {
+      "namespace": "identity",
+      "identifier": "/ietf-schc:di-down",
+      "sid": 5011
+    },
+    {
+      "namespace": "identity",
+      "identifier": "/ietf-schc:di-bidirectional",
+      "sid": 5012
+    },
+    {
+      "namespace": "identity",
+      "identifier": "/ietf-schc:mo-equal",
+      "sid": 5020
+    },
+    {
+      "namespace": "identity",
+      "identifier": "/ietf-schc:mo-ignore",
+      "sid": 5021
+    },
+    {
+      "namespace": "identity",
+      "identifier": "/ietf-schc:mo-msb",
+      "sid": 5022
+    },
+    {
+      "namespace": "identity",
+      "identifier": "/ietf-schc:mo-match-mapping",
+      "sid": 5023
+    },
+    {
+      "namespace": "identity",
+      "identifier": "/ietf-schc:cda-not-sent",
+      "sid": 5030
+    },
+    {
+      "namespace": "identity",
+      "identifier": "/ietf-schc:cda-value-sent",
+      "sid": 5031
+    },
+    {
+      "namespace": "identity",
+      "identifier": "/ietf-schc:cda-lsb",
+      "sid": 5032
+    },
+    {
+      "namespace": "identity",
+      "identifier": "/ietf-schc:cda-mapping-sent",
+      "sid": 5033
+    },
+    {
+      "namespace": "identity",
+      "identifier": "/ietf-schc:cda-compute",
+      "sid": 5034
+    },
+    {
+      "namespace": "identity",
+      "identifier": "/ietf-schc:cda-deviid",
+      "sid": 5035
+    },
+    {
+      "namespace": "identity",
+      "identifier": "/ietf-schc:cda-appiid",
+      "sid": 5036
+    },
+    {
+      "namespace": "data",
+      "identifier": "/ietf-schc:schc",
+      "sid": 5100,
+      "type": "container"
+    },
+    {
+      "namespace": "data",
+      "identifier": "/ietf-schc:schc/rule",
+      "sid": 5110,
+      "type": "list"
+    },
+    {
+      "namespace": "data",
+      "identifier": "/ietf-schc:schc/rule/rule-id-value",
+      "sid": 5135,
+      "type": "uint32"
+    },
+    {
+      "namespace": "data",
+      "identifier": "/ietf-schc:schc/rule/rule-id-length",
+      "sid": 5136,
+      "type": "uint8"
+    },
+    {
+      "namespace": "data",
+      "identifier": "/ietf-schc:schc/rule/rule-status",
+      "sid": 5137,
+      "type": "identityref"
+    },
+    {
+      "namespace": "data",
+      "identifier": "/ietf-schc:schc/rule/rule-nature",
+      "sid": 5138,
+      "type": "identityref"
+    },
+    {
+      "namespace": "data",
+      "identifier": "/ietf-schc:schc/rule/comment",
+      "sid": 5139,
+      "type": "string"
+    },
+    {
+      "namespace": "data",
+      "identifier": "/ietf-schc:schc/rule/entry",
+      "sid": 5140,
+      "type": "list"
+    },
+    {
+      "namespace": "data",
+      "identifier": "/ietf-schc:schc/rule/entry/field-id",
+      "sid": 5141,
+      "type": "identityref"
+    },
+    {
+      "namespace": "data",
+      "identifier": "/ietf-schc:schc/rule/entry/field-length",
+      "sid": 5142,
+      "type": "uint16"
+    },
+    {
+      "namespace": "data",
+      "identifier": "/ietf-schc:schc/rule/entry/field-position",
+      "sid": 5143,
+      "type": "uint8"
+    },
+    {
+      "namespace": "data",
+      "identifier": "/ietf-schc:schc/rule/entry/direction-indicator",
+      "sid": 5144,
+      "type": "identityref"
+    },
+    {
+      "namespace": "data",
+      "identifier": "/ietf-schc:schc/rule/entry/matching-operator",
+      "sid": 5145,
+      "type": "identityref"
+    },
+    {
+      "namespace": "data",
+      "identifier": "/ietf-schc:schc/rule/entry/matching-operator-value",
+      "sid": 5146,
+      "type": "list"
+    },
+    {
+      "namespace": "data",
+      "identifier": "/ietf-schc:schc/rule/entry/matching-operator-value/index",
+      "sid": 5147,
+      "type": "uint8"
+    },
+    {
+      "namespace": "data",
+      "identifier": "/ietf-schc:schc/rule/entry/matching-operator-value/value",
+      "sid": 5148,
+      "type": "binary"
+    },
+    {
+      "namespace": "data",
+      "identifier": "/ietf-schc:schc/rule/entry/comp-decomp-action",
+      "sid": 5150,
+      "type": "identityref"
+    },
+    {
+      "namespace": "data",
+      "identifier": "/ietf-schc:schc/rule/entry/comp-decomp-action-value",
+      "sid": 5151,
+      "type": "list"
+    },
+    {
+      "namespace": "data",
+      "identifier": "/ietf-schc:schc/rule/entry/comp-decomp-action-value/index",
+      "sid": 5152,
+      "type": "uint8"
+    },
+    {
+      "namespace": "data",
+      "identifier": "/ietf-schc:schc/rule/entry/comp-decomp-action-value/value",
+      "sid": 5153,
+      "type": "binary"
+    },
+    {
+      "namespace": "data",
+      "identifier": "/ietf-schc:schc/rule/entry/target-value",
+      "sid": 5160,
+      "type": "list"
+    },
+    {
+      "namespace": "data",
+      "identifier": "/ietf-schc:schc/rule/entry/target-value/index",
+      "sid": 5161,
+      "type": "uint8"
+    },
+    {
+      "namespace": "data",
+      "identifier": "/ietf-schc:schc/rule/entry/target-value/value",
+      "sid": 5162,
+      "type": "binary"
+    },
+    {
+      "namespace": "rpc",
+      "identifier": "/ietf-schc:duplicate-rule",
+      "sid": 5200
+    },
+    {
+      "namespace": "data",
+      "identifier": "/ietf-schc:duplicate-rule/input",
+      "sid": 5201,
+      "type": "container"
+    },
+    {
+      "namespace": "data",
+      "identifier": "/ietf-schc:duplicate-rule/input/source-rule-id-value",
+      "sid": 5202,
+      "type": "uint32"
+    },
+    {
+      "namespace": "data",
+      "identifier": "/ietf-schc:duplicate-rule/input/source-rule-id-length",
+      "sid": 5203,
+      "type": "uint8"
+    },
+    {
+      "namespace": "data",
+      "identifier": "/ietf-schc:duplicate-rule/input/target-rule-id-value",
+      "sid": 5204,
+      "type": "uint32"
+    },
+    {
+      "namespace": "data",
+      "identifier": "/ietf-schc:duplicate-rule/input/target-rule-id-length",
+      "sid": 5205,
+      "type": "uint8"
+    },
+    {
+      "namespace": "data",
+      "identifier": "/ietf-schc:duplicate-rule/input/modifications",
+      "sid": 5206,
+      "type": "anydata"
+    },
+    {
+      "namespace": "data",
+      "identifier": "/ietf-schc:duplicate-rule/output",
+      "sid": 5210,
+      "type": "container"
+    },
+    {
+      "namespace": "data",
+      "identifier": "/ietf-schc:duplicate-rule/output/status",
+      "sid": 5211,
+      "type": "string"
+    }
+  ],
+  "key-mapping": {
+    "5110": [5135, 5136],
+    "5140": [5141, 5143, 5144],
+    "5146": [5147],
+    "5151": [5152],
+    "5160": [5161]
+  }
+}

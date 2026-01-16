@@ -3,6 +3,10 @@
 //! Ensures that both endpoints wait for a guard period (based on RTT)
 //! before using newly provisioned rules, enabling synchronization
 //! across high-latency links like Earth-Moon communication.
+//!
+//! - Rule creation does NOT require a guard period (immediately active)
+//! - Rule modification requires a guard period (candidate state)
+//! - Rule deletion requires a guard period during which the rule ID is blocked
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -30,6 +34,10 @@ pub enum RuleState {
 /// The guard period ensures that newly provisioned rules are not used
 /// until both endpoints have had time to receive and process the update.
 /// The guard period is calculated as a multiple of the estimated RTT.
+///
+/// - New rules are immediately active (no guard period)
+/// - Modified rules enter candidate state for guard period
+/// - Deleted rules block their ID for guard period (no re-creation allowed)
 #[derive(Debug)]
 pub struct GuardPeriodManager {
     /// Estimated RTT to peer (e.g., 2.5s for Earth-Moon)
@@ -38,6 +46,9 @@ pub struct GuardPeriodManager {
     safety_multiplier: f64,
     /// Rule states by (rule_id, rule_id_length)
     rule_states: HashMap<(u32, u8), RuleState>,
+    /// Blocked rule IDs during deletion guard period
+    /// Per draft: "a rule with the same ID cannot be created" during guard period
+    blocked_ids: HashMap<(u32, u8), Instant>,
 }
 
 impl GuardPeriodManager {
@@ -50,6 +61,7 @@ impl GuardPeriodManager {
             estimated_rtt,
             safety_multiplier: 2.0,
             rule_states: HashMap::new(),
+            blocked_ids: HashMap::new(),
         }
     }
 
@@ -59,6 +71,7 @@ impl GuardPeriodManager {
             estimated_rtt,
             safety_multiplier: multiplier,
             rule_states: HashMap::new(),
+            blocked_ids: HashMap::new(),
         }
     }
 
@@ -104,6 +117,8 @@ impl GuardPeriodManager {
     /// Schedule a rule for deprecation
     ///
     /// The rule remains active until the expiry time, then is removed.
+    /// Per draft-toutain: "a rule with the same ID cannot be created" during
+    /// the guard period after deletion.
     pub fn schedule_deprecation(&mut self, rule_id: u32, rule_id_length: u8) {
         let expiry_time = Instant::now() + self.guard_period();
         log::info!(
@@ -116,6 +131,35 @@ impl GuardPeriodManager {
             (rule_id, rule_id_length),
             RuleState::Deprecated { expiry_time },
         );
+        // Block this rule ID from being re-created during guard period
+        self.blocked_ids
+            .insert((rule_id, rule_id_length), expiry_time);
+    }
+
+    /// Check if a rule ID is blocked (during deletion guard period)
+    ///
+    /// Per draft-toutain: During deletion guard period, "a rule with the same
+    /// ID cannot be created, and SCHC PDU carrying the Rule ID are dropped."
+    pub fn is_rule_id_blocked(&self, rule_id: u32, rule_id_length: u8) -> bool {
+        if let Some(&expiry_time) = self.blocked_ids.get(&(rule_id, rule_id_length)) {
+            Instant::now() < expiry_time
+        } else {
+            false
+        }
+    }
+
+    /// Get time until a blocked rule ID becomes available
+    pub fn time_until_unblocked(&self, rule_id: u32, rule_id_length: u8) -> Option<Duration> {
+        if let Some(&expiry_time) = self.blocked_ids.get(&(rule_id, rule_id_length)) {
+            let now = Instant::now();
+            if now < expiry_time {
+                Some(expiry_time - now)
+            } else {
+                Some(Duration::ZERO)
+            }
+        } else {
+            None
+        }
     }
 
     /// Check if a rule is currently active (can be used for compression)
@@ -151,11 +195,12 @@ impl GuardPeriodManager {
     /// Update rule states, transitioning pending rules to active
     ///
     /// Call this periodically to update rule states based on elapsed time.
-    /// Returns a list of rules that were activated or removed.
+    /// Returns a list of rules that were activated, removed, or unblocked.
     pub fn tick(&mut self) -> Vec<(u32, u8, &'static str)> {
         let now = Instant::now();
         let mut changes = Vec::new();
         let mut to_remove = Vec::new();
+        let mut to_unblock = Vec::new();
 
         for (&(rule_id, rule_id_length), state) in self.rule_states.iter_mut() {
             match state {
@@ -176,9 +221,22 @@ impl GuardPeriodManager {
             }
         }
 
+        // Clean up expired blocked IDs
+        for (&(rule_id, rule_id_length), &expiry_time) in self.blocked_ids.iter() {
+            if now >= expiry_time {
+                to_unblock.push((rule_id, rule_id_length));
+                changes.push((rule_id, rule_id_length, "unblocked"));
+            }
+        }
+
         for key in to_remove {
             self.rule_states.remove(&key);
             log::info!("Rule {}/{} removed after deprecation", key.0, key.1);
+        }
+
+        for key in to_unblock {
+            self.blocked_ids.remove(&key);
+            log::info!("Rule ID {}/{} unblocked after guard period", key.0, key.1);
         }
 
         changes
@@ -198,9 +256,20 @@ impl GuardPeriodManager {
             .collect()
     }
 
-    /// Clear all rule states
+    /// Clear all rule states and blocked IDs
     pub fn clear(&mut self) {
         self.rule_states.clear();
+        self.blocked_ids.clear();
+    }
+
+    /// Get all currently blocked rule IDs
+    pub fn blocked_rule_ids(&self) -> Vec<(u32, u8)> {
+        let now = Instant::now();
+        self.blocked_ids
+            .iter()
+            .filter(|(_, &expiry)| now < expiry)
+            .map(|(&key, _)| key)
+            .collect()
     }
 }
 
@@ -261,5 +330,43 @@ mod tests {
         let changes = manager.tick();
         assert!(!changes.is_empty());
         assert_eq!(changes[0], (42, 6, "activated"));
+    }
+
+    #[test]
+    fn test_deletion_blocks_rule_id() {
+        let mut manager = GuardPeriodManager::new(Duration::from_millis(10));
+
+        // Mark rule as active first
+        manager.mark_active(50, 6);
+
+        // Schedule deprecation - should block the ID
+        manager.schedule_deprecation(50, 6);
+
+        // ID should be blocked immediately
+        assert!(manager.is_rule_id_blocked(50, 6));
+
+        // Other IDs should not be blocked
+        assert!(!manager.is_rule_id_blocked(51, 6));
+        assert!(!manager.is_rule_id_blocked(50, 7));
+
+        // Wait for guard period to expire
+        sleep(Duration::from_millis(25));
+        manager.tick();
+
+        // ID should no longer be blocked
+        assert!(!manager.is_rule_id_blocked(50, 6));
+    }
+
+    #[test]
+    fn test_blocked_rule_ids_list() {
+        let mut manager = GuardPeriodManager::new(Duration::from_millis(50));
+
+        manager.schedule_deprecation(10, 4);
+        manager.schedule_deprecation(20, 4);
+
+        let blocked = manager.blocked_rule_ids();
+        assert_eq!(blocked.len(), 2);
+        assert!(blocked.contains(&(10, 4)));
+        assert!(blocked.contains(&(20, 4)));
     }
 }
