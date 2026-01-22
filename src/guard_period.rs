@@ -302,7 +302,7 @@ mod tests {
             !manager.is_rule_active(100, 8)
                 || manager
                     .time_until_active(100, 8)
-                    .map_or(false, |d| d.is_zero())
+                    .is_some_and(|d| d.is_zero())
         );
 
         // Wait for guard period

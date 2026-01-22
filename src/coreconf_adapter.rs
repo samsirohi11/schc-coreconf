@@ -9,6 +9,7 @@
 use rust_coreconf::coap_types::{ContentFormat, Method, Request, Response, ResponseCode};
 use rust_coreconf::{CoreconfModel, Datastore, RequestHandler};
 use serde_json::Value;
+use std::io::Cursor;
 use std::sync::{Arc, RwLock};
 
 use crate::conversion::{
@@ -293,10 +294,178 @@ impl SchcCoreconfHandler {
     }
 
     /// Parse and validate iPATCH operations
-    fn parse_and_validate_ipatch(&self, _payload: &[u8]) -> Result<Vec<PatchOperation>> {
-        // For now, return empty - full CBOR parsing would go here
-        // This is a placeholder for the actual implementation
-        Ok(Vec::new())
+    ///
+    /// iPATCH payload is application/yang-instances+cbor-seq format:
+    /// A sequence of CBOR maps where each map is {SID: value}
+    /// - Create/Modify: {SID: data} where data contains the rule information
+    /// - Delete: {SID: null}
+    fn parse_and_validate_ipatch(&self, payload: &[u8]) -> Result<Vec<PatchOperation>> {
+        let mut operations = Vec::new();
+        let mut cursor = Cursor::new(payload);
+
+        // Parse CBOR sequence
+        while (cursor.position() as usize) < payload.len() {
+            let value: Value = ciborium::from_reader(&mut cursor)
+                .map_err(|e| Error::Coreconf(format!("CBOR decode error: {}", e)))?;
+
+            // Each item should be a map {SID: value}
+            if let Value::Object(map) = value {
+                for (key, val) in map {
+                    // Key is the SID as string
+                    let target_sid: i64 = key
+                        .parse()
+                        .map_err(|_| Error::Conversion("Invalid SID in iPATCH".into()))?;
+
+                    // Determine operation type based on target SID and value
+                    let op = self.parse_patch_operation(target_sid, val)?;
+                    if let Some(operation) = op {
+                        operations.push(operation);
+                    }
+                }
+            }
+        }
+
+        Ok(operations)
+    }
+
+    /// Parse a single patch operation from SID + value
+    fn parse_patch_operation(&self, target_sid: i64, value: Value) -> Result<Option<PatchOperation>> {
+        // SID 5110 = /ietf-schc:schc/rule (rule list)
+        // SID 5135 = rule-id-value
+        // SID 5136 = rule-id-length
+
+        match target_sid {
+            // Rule list (5110) - creating a new rule entry
+            5110 => {
+                if value.is_null() {
+                    // Delete all rules (not typically used)
+                    log::warn!("iPATCH with null value for rule list SID - delete all not supported");
+                    return Ok(None);
+                }
+
+                // Check if this is an array (instance identifier with keys for delete)
+                if let Some(arr) = value.as_array() {
+                    // Format: [rule-id-value, rule-id-length] means delete that specific rule
+                    if arr.len() >= 2 {
+                        let rule_id = arr
+                            .first()
+                            .and_then(|v| v.as_u64())
+                            .ok_or_else(|| Error::Conversion("Invalid rule-id-value in array".into()))?
+                            as u32;
+                        let rule_id_length = arr
+                            .get(1)
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(8) as u8;
+                        return Ok(Some(PatchOperation::Delete(rule_id, rule_id_length)));
+                    }
+                }
+
+                // Value should contain rule data with rule-id-value/length
+                self.parse_rule_create_or_modify(&value)
+            }
+            // Direct rule-id-value modification (usually combined with rule context)
+            5135 | 5136 => {
+                // These are key fields, modifications come through rule (5110)
+                log::debug!("Ignoring direct key field modification SID {}", target_sid);
+                Ok(None)
+            }
+            // Field-level modifications (5140-5162)
+            5140..=5162 => {
+                if value.is_null() {
+                    // Delete field entry
+                    log::debug!("Field deletion via SID {} not directly supported", target_sid);
+                    Ok(None)
+                } else {
+                    // Field modification - would need context of which rule
+                    log::debug!("Field modification via SID {} - need rule context", target_sid);
+                    Ok(None)
+                }
+            }
+            // Handle rule with keys embedded in path
+            _ => {
+                // Check if this is a null value (delete operation)
+                if value.is_null() {
+                    log::debug!("Null value for SID {} - delete operation ignored without key context", target_sid);
+                    return Ok(None);
+                }
+
+                // Check if this is a complete rule specification with nested data
+                if let Some(obj) = value.as_object() {
+                    // Check if it contains rule keys
+                    let has_rule_id = obj.contains_key("rule-id-value")
+                        || obj.contains_key(&sid::RULE_ID_VALUE.to_string());
+
+                    if has_rule_id {
+                        return self.parse_rule_create_or_modify(&value);
+                    }
+                }
+
+                log::debug!("Unknown SID {} in iPATCH, skipping", target_sid);
+                Ok(None)
+            }
+        }
+    }
+
+    /// Parse rule create/modify operation from YANG JSON
+    #[allow(clippy::needless_borrows_for_generic_args)]
+    fn parse_rule_create_or_modify(&self, value: &Value) -> Result<Option<PatchOperation>> {
+        // Extract rule-id-value and rule-id-length from the value
+        // They might be keyed by SID or by name
+
+        let rule_id_value = value
+            .get("rule-id-value")
+            .or_else(|| value.get(&sid::RULE_ID_VALUE.to_string()))
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| Error::Conversion("Missing rule-id-value in rule data".into()))?
+            as u32;
+
+        let rule_id_length = value
+            .get("rule-id-length")
+            .or_else(|| value.get(&sid::RULE_ID_LENGTH.to_string()))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(8) as u8;
+
+        // Check if the rule exists (modify) or is new (create)
+        let manager = self.manager.read().unwrap();
+        let exists = manager
+            .all_rules()
+            .iter()
+            .any(|r| r.rule_id == rule_id_value && r.rule_id_length == rule_id_length);
+        drop(manager);
+
+        if exists {
+            // Modify existing rule
+            Ok(Some(PatchOperation::Modify(
+                rule_id_value,
+                rule_id_length,
+                value.clone(),
+            )))
+        } else {
+            // Create new rule
+            Ok(Some(PatchOperation::Create(value.clone())))
+        }
+    }
+
+    /// Parse delete operation for a rule
+    #[allow(dead_code)]
+    fn parse_rule_delete(&self, path_value: &Value) -> Result<Option<PatchOperation>> {
+        // Extract rule keys from the path
+        if let Some(arr) = path_value.as_array() {
+            // Array format: [sid_delta, key1, key2, ...]
+            // For rules: [5110 delta, rule-id-value, rule-id-length]
+            if arr.len() >= 3 {
+                let rule_id = arr
+                    .get(1)
+                    .and_then(|v| v.as_u64())
+                    .ok_or_else(|| Error::Conversion("Invalid rule-id in delete".into()))?
+                    as u32;
+                let rule_id_length = arr.get(2).and_then(|v| v.as_u64()).unwrap_or(8) as u8;
+
+                return Ok(Some(PatchOperation::Delete(rule_id, rule_id_length)));
+            }
+        }
+
+        Ok(None)
     }
 
     /// Parse RPC request from CBOR payload
@@ -410,11 +579,15 @@ impl SchcCoreconfHandler {
 }
 
 /// Patch operation types for iPATCH
-/// These variants are placeholders for full CBOR parsing implementation
-#[allow(dead_code)]
+///
+/// These represent the different CORECONF operations that can be
+/// performed on SCHC rules via iPATCH requests.
 enum PatchOperation {
+    /// Create a new rule from YANG JSON data
     Create(Value),
+    /// Modify an existing rule (rule_id, rule_id_length, YANG JSON data)
     Modify(u32, u8, Value),
+    /// Delete a rule by ID (rule_id, rule_id_length)
     Delete(u32, u8),
 }
 

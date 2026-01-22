@@ -442,8 +442,9 @@ impl SchcCoreconfManager {
                     if let Ok(fid) = yang_fid_to_schc(fid_str) {
                         if let Some(field) = rule.compression.iter_mut().find(|f| f.fid == fid) {
                             // Apply target-value modification
+                            // Convert YANG format [{"index": 0, "value": "base64..."}] to internal format
                             if let Some(tv) = entry_mod.get("target-value") {
-                                field.tv = Some(tv.clone());
+                                field.tv = Some(Self::convert_yang_target_value(tv, fid));
                             }
                             // Apply matching-operator modification
                             if let Some(mo_str) =
@@ -463,6 +464,10 @@ impl SchcCoreconfManager {
                                     field.cda = cda;
                                 }
                             }
+                            // Re-parse target value after modifications
+                            if let Err(e) = field.parse_tv() {
+                                log::warn!("Failed to parse target value for field {:?}: {}", field.fid, e);
+                            }
                         }
                     }
                 }
@@ -470,6 +475,58 @@ impl SchcCoreconfManager {
         }
 
         Ok(rule)
+    }
+
+    /// Convert YANG target-value format to internal SCHC format
+    ///
+    /// YANG format: [{"index": 0, "value": "base64..."}]
+    /// Internal format: numeric value (for ports, etc.) or hex string (for addresses)
+    fn convert_yang_target_value(yang_tv: &Value, fid: FieldId) -> Value {
+        use base64::Engine;
+        
+        // Try to extract the first value from the YANG array format
+        if let Some(arr) = yang_tv.as_array() {
+            if let Some(first) = arr.first() {
+                if let Some(b64_str) = first.get("value").and_then(|v| v.as_str()) {
+                    // Decode base64
+                    if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(b64_str) {
+                        // Convert based on field type
+                        return Self::bytes_to_internal_tv(&bytes, fid);
+                    }
+                }
+            }
+        }
+        
+        // If it's already in a simple format, return as-is
+        yang_tv.clone()
+    }
+
+    /// Convert bytes to internal target value format based on field type
+    fn bytes_to_internal_tv(bytes: &[u8], fid: FieldId) -> Value {
+        // Small numeric fields (ports, flow label, etc.) - convert to number
+        if bytes.len() <= 4 {
+            let mut val: u64 = 0;
+            for b in bytes {
+                val = (val << 8) | (*b as u64);
+            }
+            return Value::Number(val.into());
+        }
+        
+        // Larger fields (IIDs, prefixes) - use hex format
+        let fid_str = fid.as_str();
+        if fid_str.ends_with("IID") {
+            // For IID fields, try to represent as u64 for simple matching
+            if bytes.len() == 8 {
+                let mut val: u64 = 0;
+                for b in bytes {
+                    val = (val << 8) | (*b as u64);
+                }
+                return Value::Number(val.into());
+            }
+        }
+        
+        // For PREFIX and other large fields, use hex string
+        Value::String(format!("0x{}", hex::encode(bytes)))
     }
 
     // ========================================================================

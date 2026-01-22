@@ -1,0 +1,46 @@
+[
+  {
+    "RuleID": 8,
+    "RuleIDLength": 4,
+    "Comment": "Base rule for IPv6/UDP traffic - fields like source address are value-sent for flexibility",
+    "Compression": [
+      { "FID": "IPV6.VER", "FL": 4, "TV": 6, "MO": "equal", "CDA": "not-sent" },
+      { "FID": "IPV6.TC", "FL": 8, "TV": 0, "MO": "equal", "CDA": "not-sent" },
+      { "FID": "IPV6.FL", "FL": 20, "MO": "ignore", "CDA": "value-sent" },
+      { "FID": "IPV6.LEN", "FL": 16, "MO": "ignore", "CDA": "compute" },
+      {
+        "FID": "IPV6.NXT",
+        "FL": 8,
+        "TV": 17,
+        "MO": "equal",
+        "CDA": "not-sent"
+      },
+      {
+        "FID": "IPV6.HOP_LMT",
+        "FL": 8,
+        "TV": 64,
+        "MO": "equal",
+        "CDA": "not-sent"
+      },
+      {
+        "FID": "IPV6.DEV_PREFIX",
+        "FL": 64,
+        "TV": "2001:db8::/64",
+        "MO": "equal",
+        "CDA": "not-sent"
+      },
+      { "FID": "IPV6.DEV_IID", "FL": 64, "MO": "ignore", "CDA": "value-sent" },
+      {
+        "FID": "IPV6.APP_PREFIX",
+        "FL": 64,
+        "MO": "ignore",
+        "CDA": "value-sent"
+      },
+      { "FID": "IPV6.APP_IID", "FL": 64, "MO": "ignore", "CDA": "value-sent" },
+      { "FID": "UDP.DEV_PORT", "FL": 16, "MO": "ignore", "CDA": "value-sent" },
+      { "FID": "UDP.APP_PORT", "FL": 16, "MO": "ignore", "CDA": "value-sent" },
+      { "FID": "UDP.LEN", "FL": 16, "MO": "ignore", "CDA": "compute" },
+      { "FID": "UDP.CKSUM", "FL": 16, "MO": "ignore", "CDA": "compute" }
+    ]
+  }
+]

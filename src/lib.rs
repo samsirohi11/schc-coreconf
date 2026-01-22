@@ -59,6 +59,7 @@ mod identities;
 mod m_rules;
 mod manager;
 mod rule_learner;
+pub mod sor_loader;
 
 pub use conversion::{
     schc_rule_to_yang, schc_rule_to_yang_with_metadata, yang_to_schc_rule,
@@ -74,3 +75,9 @@ pub use identities::{
 pub use m_rules::MRuleSet;
 pub use manager::SchcCoreconfManager;
 pub use rule_learner::RuleLearner;
+pub use sor_loader::{
+    load_sor_rules, parse_cbor_rules,
+    rules_to_cbor, rules_to_cbor_value,
+    field_id_to_sid, mo_to_sid, cda_to_sid,
+    format_field_with_sid, display_rules_with_sids,
+};

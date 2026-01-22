@@ -32,17 +32,20 @@ env_logger = "0.11"
 # Error handling
 thiserror = "2"
 
+# Ctrl+C handling
+ctrlc = "3"
+
 [dev-dependencies]
 tokio-test = "0.4"
 
 [[example]]
-name = "schc_coap_server"
-path = "examples/schc_coap_server.rs"
+name = "schc_core"
+path = "examples/schc_core.rs"
 
 [[example]]
-name = "schc_coap_client"
-path = "examples/schc_coap_client.rs"
+name = "schc_device"
+path = "examples/schc_device.rs"
 
 [[example]]
-name = "progressive_rule_demo"
-path = "examples/progressive_rule_demo.rs"
+name = "sor_converter"
+path = "examples/sor_converter.rs"
