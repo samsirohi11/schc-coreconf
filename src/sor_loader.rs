@@ -8,7 +8,7 @@ use std::path::Path;
 
 use ciborium::Value as CborValue;
 use rust_coreconf::SidFile;
-use schc::{CompressionAction, Field, FieldId, MatchingOperator, Rule};
+use schc::{CompressionAction, Direction, Field, FieldId, MatchingOperator, Rule};
 
 use crate::error::{Error, Result};
 
@@ -61,6 +61,11 @@ const SID_CDA_VALUE_SENT: i64 = 2921;
 const SID_CDA_MAPPING_SENT: i64 = 2922;
 const SID_CDA_LSB: i64 = 2923;
 const SID_CDA_COMPUTE: i64 = 2924;
+
+// Identity SIDs for Direction Indicator
+const SID_DI_BIDIRECTIONAL: i64 = 2880;
+const SID_DI_DOWN: i64 = 2881;
+const SID_DI_UP: i64 = 2882;
 
 // =============================================================================
 // Public API
@@ -147,7 +152,14 @@ fn parse_rule(rule_value: &CborValue, sid_file: &SidFile) -> Result<Rule> {
         if let Some(entries_array) = entries_value.as_array() {
             for entry in entries_array {
                 match parse_field_entry(entry, sid_file) {
-                    Ok(field) => compression.push(field),
+                    Ok(mut field) => {
+                        // Parse target value from JSON/CBOR into parsed_tv
+                        // This is critical for matching logic to work
+                        if let Err(e) = field.parse_tv() {
+                            log::warn!("Failed to parse TV for field {}: {:?}", field.fid, e);
+                        }
+                        compression.push(field)
+                    },
                     Err(e) => {
                         log::debug!("Skipping field: {}", e);
                     }
@@ -193,6 +205,9 @@ fn parse_normal_field_entry(
     let fl = find_integer_by_delta(entry_map, DELTA_FIELD_LENGTH)
         .map(|v| v as u16);
     
+    // Direction Indicator (delta +6 = 2626)
+    let di = parse_direction(entry_map, DELTA_DIRECTION);
+
     // Target Value (delta +8 = 2628)
     let tv = parse_target_value(entry_map, DELTA_TARGET_VALUE);
     
@@ -214,7 +229,7 @@ fn parse_normal_field_entry(
     Ok(Field {
         fid,
         fl,
-        di: None, // Logic for DI parsing can be added later if needed
+        di,
         tv,
         mo,
         mo_val,
@@ -242,6 +257,9 @@ fn parse_universal_option_entry(
     // Field Length (negative delta -11)
     let fl = find_integer_by_neg_delta(entry_map, 11).map(|v| v as u16);
     
+    // Direction Indicator (negative delta -12)
+    let di = parse_direction_neg(entry_map, 12);
+
     // Target Value (negative delta -3)
     let tv = parse_target_value_neg(entry_map, 3);
     
@@ -263,7 +281,7 @@ fn parse_universal_option_entry(
     Ok(Field {
         fid,
         fl,
-        di: None,
+        di,
         tv,
         mo,
         mo_val,
@@ -359,6 +377,25 @@ fn extract_first_mo_value(mo_value_array: &CborValue) -> Option<u8> {
         }
     } else {
         None
+    }
+}
+
+fn parse_direction(entry_map: &[(CborValue, CborValue)], delta: i64) -> Option<Direction> {
+    let di_sid = find_integer_by_delta(entry_map, delta)?;
+    sid_to_di(di_sid)
+}
+
+fn parse_direction_neg(entry_map: &[(CborValue, CborValue)], neg_delta: i64) -> Option<Direction> {
+    let di_sid = find_integer_by_neg_delta(entry_map, neg_delta)?;
+    sid_to_di(di_sid)
+}
+
+fn sid_to_di(sid: i64) -> Option<Direction> {
+    match sid {
+        SID_DI_UP => Some(Direction::Up),
+        SID_DI_DOWN => Some(Direction::Down),
+        SID_DI_BIDIRECTIONAL => None, // Bidirectional is None
+        _ => None, // Default to bidirectional for unknown values
     }
 }
 

@@ -339,9 +339,9 @@ fn build_ipv6_udp_packet(
     src_iid: &[u8; 8],
     dst_prefix: &[u8; 8],
     dst_iid: &[u8; 8],
-    src_port: u16,
+    _src_port: u16,
     dst_port: u16,
-    flow_label: u32,
+    _flow_label: u32,
     payload: &[u8],
 ) -> Vec<u8> {
     let mut packet = Vec::with_capacity(14 + 40 + 8 + payload.len());
@@ -354,8 +354,8 @@ fn build_ipv6_udp_packet(
     ]);
 
     // IPv6 Header (40 bytes)
-    // Version (4 bits) = 6, Traffic Class (8 bits) = 0, Flow Label (20 bits)
-    let version_tc_fl = (6u32 << 28) | (flow_label & 0xFFFFF);
+    // Version 6, TC 1 (as per M-Rules), FL 0x23456 (144470)
+    let version_tc_fl = (6u32 << 28) | (1u32 << 20) | 0x23456;
     packet.extend_from_slice(&version_tc_fl.to_be_bytes());
 
     // Payload Length (UDP header + payload)
@@ -377,7 +377,8 @@ fn build_ipv6_udp_packet(
     packet.extend_from_slice(dst_iid);
 
     // UDP Header (8 bytes)
-    packet.extend_from_slice(&src_port.to_be_bytes());
+    // Use fixed source port 3865 as per M-Rules
+    packet.extend_from_slice(&3865u16.to_be_bytes());
     packet.extend_from_slice(&dst_port.to_be_bytes());
     packet.extend_from_slice(&payload_length.to_be_bytes());
 
@@ -431,7 +432,7 @@ fn build_mgmt_packet(coap_payload: &[u8]) -> Vec<u8> {
     packet.extend_from_slice(&dst_iid);
 
     // UDP Header (8 bytes)
-    packet.extend_from_slice(&5683u16.to_be_bytes()); // src port
+    packet.extend_from_slice(&3865u16.to_be_bytes()); // src port (per M-Rule)
     packet.extend_from_slice(&5683u16.to_be_bytes()); // dst port
     packet.extend_from_slice(&payload_length.to_be_bytes());
     packet.extend_from_slice(&[0x00, 0x00]); // checksum (0 for now)
@@ -454,7 +455,7 @@ fn send_coap_post(
     *message_id = message_id.wrapping_add(1);
     coap_packet.header.code = MessageClass::Request(RequestType::Post);
     coap_packet.header.set_type(MessageType::Confirmable);
-    coap_packet.set_token(vec![0x01]);
+    coap_packet.set_token(vec![]); // Empty token per M-Rule
     coap_packet.add_option(coap_lite::CoapOption::UriPath, b"c".to_vec());
     // Use Content-Format 313 (application/yang-instances+cbor-seq) for CORECONF POST
     coap_packet.add_option(coap_lite::CoapOption::ContentFormat, vec![0x01, 0x39]);

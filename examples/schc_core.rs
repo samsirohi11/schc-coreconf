@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use coap_lite::{
-    CoapRequest, ContentFormat as CoapContentFormat, MessageClass, Packet, RequestType,
+    CoapRequest, ContentFormat as CoapContentFormat, MessageClass, MessageType, Packet, RequestType,
     ResponseType,
 };
 use rust_coreconf::SidFile;
@@ -333,6 +333,7 @@ fn handle_coreconf_request(
 
     let mut response = Packet::new();
     response.header.message_id = packet.header.message_id;
+    response.header.set_type(MessageType::Acknowledgement);
     response.set_token(packet.get_token().to_vec());
 
     let (class, detail) = coreconf_response.code.to_code_pair();
@@ -421,7 +422,8 @@ fn build_mgmt_response_packet(coap_payload: &[u8]) -> Vec<u8> {
     ]);
 
     // IPv6 Header (40 bytes)
-    let version_tc_fl = (6u32 << 28) | 0; // Version 6, TC 0, FL 0
+    // Version 6, TC 1 (as per M-Rules), FL 0x23456 (144470)
+    let version_tc_fl = (6u32 << 28) | (1u32 << 20) | 0x23456;
     packet.extend_from_slice(&version_tc_fl.to_be_bytes());
 
     // Payload Length (UDP header + CoAP)
@@ -442,7 +444,7 @@ fn build_mgmt_response_packet(coap_payload: &[u8]) -> Vec<u8> {
 
     // UDP Header (8 bytes)
     packet.extend_from_slice(&5683u16.to_be_bytes()); // src port
-    packet.extend_from_slice(&5683u16.to_be_bytes()); // dst port
+    packet.extend_from_slice(&3865u16.to_be_bytes()); // dst port (per M-Rule)
     packet.extend_from_slice(&payload_length.to_be_bytes());
     packet.extend_from_slice(&[0x00, 0x00]); // checksum (0 for now)
 
