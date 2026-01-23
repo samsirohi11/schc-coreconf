@@ -256,6 +256,7 @@ mod tests {
         Field {
             fid,
             fl: None,
+            di: None,
             tv: None,
             mo: MatchingOperator::Ignore,
             cda,

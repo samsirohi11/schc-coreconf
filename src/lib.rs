@@ -58,6 +58,8 @@ mod guard_period;
 mod identities;
 mod m_rules;
 mod manager;
+pub mod mgmt_compression;
+pub mod rpc_builder;
 mod rule_learner;
 pub mod sor_loader;
 

@@ -214,6 +214,7 @@ fn parse_normal_field_entry(
     Ok(Field {
         fid,
         fl,
+        di: None, // Logic for DI parsing can be added later if needed
         tv,
         mo,
         mo_val,
@@ -262,6 +263,7 @@ fn parse_universal_option_entry(
     Ok(Field {
         fid,
         fl,
+        di: None,
         tv,
         mo,
         mo_val,
@@ -447,6 +449,14 @@ fn sid_to_field_id(sid: i64, _sid_file: &SidFile) -> Result<FieldId> {
         2846 => Ok(FieldId::CoapMid),
         2847 => Ok(FieldId::CoapToken),
         
+        // CoAP options
+        2880 => Ok(FieldId::CoapUriPath),
+        2881 => Ok(FieldId::CoapContentFormat),
+        2882 => Ok(FieldId::CoapUriHost),
+        2883 => Ok(FieldId::CoapUriPort),
+        2884 => Ok(FieldId::CoapUriQuery),
+        2885 => Ok(FieldId::CoapAccept),
+        
         _ => Err(Error::Coreconf(format!("Unknown field SID: {}", sid))),
     }
 }
@@ -475,12 +485,12 @@ fn sid_to_mo(sid: i64, mo_val: Option<u8>) -> Result<MatchingOperator> {
     }
 }
 
-fn sid_to_cda(sid: i64, mo_val: Option<u8>) -> Result<CompressionAction> {
+fn sid_to_cda(sid: i64, _mo_val: Option<u8>) -> Result<CompressionAction> {
     match sid {
         SID_CDA_NOT_SENT => Ok(CompressionAction::NotSent),
         SID_CDA_VALUE_SENT => Ok(CompressionAction::ValueSent),
         SID_CDA_MAPPING_SENT => Ok(CompressionAction::MappingSent),
-        SID_CDA_LSB => Ok(CompressionAction::Lsb(mo_val.unwrap_or(0))),
+        SID_CDA_LSB => Ok(CompressionAction::Lsb),
         SID_CDA_COMPUTE => Ok(CompressionAction::Compute),
         _ => Err(Error::Coreconf(format!("Unknown CDA SID: {}", sid))),
     }
@@ -519,6 +529,14 @@ pub fn field_id_to_sid(fid: FieldId) -> Option<i64> {
         FieldId::CoapMid => Some(2846),
         FieldId::CoapToken => Some(2847),
         
+        // CoAP options (using universal option encoding would use different SIDs)
+        FieldId::CoapUriPath => Some(2880),       // URI-Path option
+        FieldId::CoapContentFormat => Some(2881), // Content-Format option
+        FieldId::CoapUriHost => Some(2882),
+        FieldId::CoapUriPort => Some(2883),
+        FieldId::CoapUriQuery => Some(2884),
+        FieldId::CoapAccept => Some(2885),
+        
         _ => None, // Not all fields have SIDs
     }
 }
@@ -539,7 +557,7 @@ pub fn cda_to_sid(cda: &CompressionAction) -> i64 {
         CompressionAction::NotSent => SID_CDA_NOT_SENT,
         CompressionAction::ValueSent => SID_CDA_VALUE_SENT,
         CompressionAction::MappingSent => SID_CDA_MAPPING_SENT,
-        CompressionAction::Lsb(_) => SID_CDA_LSB,
+        CompressionAction::Lsb => SID_CDA_LSB,
         CompressionAction::Compute => SID_CDA_COMPUTE,
     }
 }
@@ -741,7 +759,7 @@ mod tests {
     fn test_cda_sid_conversion() {
         assert!(matches!(sid_to_cda(SID_CDA_NOT_SENT, None), Ok(CompressionAction::NotSent)));
         assert!(matches!(sid_to_cda(SID_CDA_VALUE_SENT, None), Ok(CompressionAction::ValueSent)));
-        assert!(matches!(sid_to_cda(SID_CDA_LSB, Some(8)), Ok(CompressionAction::Lsb(8))));
+        assert!(matches!(sid_to_cda(SID_CDA_LSB, Some(8)), Ok(CompressionAction::Lsb)));
     }
     
     #[test]

@@ -25,11 +25,12 @@ use rust_coreconf::SidFile;
 use schc::{decompress_packet, Direction, RuleSet};
 use schc_coreconf::{
     load_sor_rules, MRuleSet, SchcCoreconfHandler, SchcCoreconfManager,
+    mgmt_compression::MgmtCompressor,
 };
 
-const M_RULES_PATH: &str = "samples/m-rules.json";
+const M_RULES_PATH: &str = "samples/m-rules.sor";
 const BASE_RULES_PATH: &str = "rules/base-ipv6-udp.sor";
-const SID_FILE_PATH: &str = "samples/ietf-schc.sid";
+const SID_FILE_PATH: &str = "samples/ietf-schc@2026-01-12.sid";
 
 fn main() -> std::io::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
@@ -52,14 +53,14 @@ fn main() -> std::io::Result<()> {
     println!("            SCHC Core (Network Endpoint)");
     println!("============================================================\n");
 
-    // Load M-Rules for CORECONF traffic compression
-    println!("Loading M-Rules from: {}", M_RULES_PATH);
-    let m_rules = MRuleSet::from_file(M_RULES_PATH).expect("Failed to load M-Rules");
-    println!("  Loaded {} M-Rules (IDs {}-{})", m_rules.rules().len(), m_rules.reserved_range().0, m_rules.reserved_range().1);
-
     // Load SID file for CORECONF parsing
     println!("Loading SID file: {}", SID_FILE_PATH);
     let sid_file = SidFile::from_file(SID_FILE_PATH).expect("Failed to load SID file");
+
+    // Load M-Rules for CORECONF traffic compression (from SOR format)
+    println!("Loading M-Rules from: {}", M_RULES_PATH);
+    let m_rules = MRuleSet::from_sor(M_RULES_PATH, &sid_file).expect("Failed to load M-Rules");
+    println!("  Loaded {} M-Rules (IDs {}-{})", m_rules.rules().len(), m_rules.reserved_range().0, m_rules.reserved_range().1);
 
     // Load base application rules from SOR (CORECONF CBOR format)
     println!("Loading base rules from: {}", BASE_RULES_PATH);
@@ -73,6 +74,10 @@ fn main() -> std::io::Result<()> {
     // Create SCHC-CORECONF manager with estimated RTT
     // Using 100ms RTT for local testing (increase for satellite/lunar links)
     let estimated_rtt = Duration::from_millis(100);
+    
+    // Create management compressor for M-rule based compression
+    let mgmt_compressor = MgmtCompressor::new(&m_rules);
+    
     let manager = SchcCoreconfManager::new(m_rules.clone(), base_rules, estimated_rtt);
     println!("\nGuard period: {:?}", manager.guard_period());
 
@@ -114,38 +119,79 @@ fn main() -> std::io::Result<()> {
         // Tick guard period manager
         coreconf_handler.tick();
 
-        // Handle CORECONF management requests
+        // Handle CORECONF management requests (compressed with M-Rules)
         if let Ok((len, src)) = mgmt_socket.recv_from(&mut mgmt_buf) {
-            if let Ok(packet) = Packet::from_bytes(&mgmt_buf[..len]) {
-                if matches!(packet.header.code, MessageClass::Empty) {
-                    continue;
+            // Decompress incoming SCHC packet with M-Rules
+            match mgmt_compressor.decompress(&mgmt_buf[..len], Direction::Up) {
+                Ok(decompressed) => {
+                    // Extract CoAP from decompressed IPv6/UDP packet
+                    // Skip: Ethernet (14) + IPv6 (40) + UDP (8) = 62 bytes
+                    if decompressed.len() < 62 {
+                        println!("\n[CORECONF] Error: Decompressed packet too small ({} bytes)", decompressed.len());
+                        continue;
+                    }
+                    let coap_bytes = &decompressed[62..];
+                    
+                    println!("\n[CORECONF] MGMT decompressed: {} bytes -> {} bytes",
+                        len, decompressed.len() - 14);
+                    
+                    if let Ok(packet) = Packet::from_bytes(coap_bytes) {
+                        if matches!(packet.header.code, MessageClass::Empty) {
+                            continue;
+                        }
+
+                        let request = CoapRequest::from_packet(packet, src);
+                        let path = request.get_path();
+
+                        println!("  {} {} /{} from {}",
+                            format_method(&request.message.header.code),
+                            request.message.payload.len(),
+                            path,
+                            src);
+
+                        let response = if path == "c" {
+                            handle_coreconf_request(&mut coreconf_handler, &request)
+                        } else {
+                            create_not_found(&request.message)
+                        };
+
+                        // Build response into IPv6/UDP/CoAP packet and compress
+                        let response_coap_bytes = response.to_bytes().unwrap_or_default();
+                        let response_packet = build_mgmt_response_packet(&response_coap_bytes);
+                        
+                        match mgmt_compressor.compress(&response_packet, Direction::Down) {
+                            Ok(compressed_response) => {
+                                println!("  Response: {:?} (compressed {} -> {} bytes)",
+                                    response.header.code,
+                                    response_packet.len() - 14,
+                                    compressed_response.len());
+                                mgmt_socket.send_to(&compressed_response, src)?;
+                            }
+                            Err(e) => {
+                                println!("  Response compression failed: {}, sending raw", e);
+                                mgmt_socket.send_to(&response_coap_bytes, src)?;
+                            }
+                        }
+
+                        // Show current rules after management operation
+                        let mgr = coreconf_handler.manager().read().unwrap();
+                        println!("  Active rules: {} M-Rules + {} app rules",
+                            mgr.m_rules().rules().len(),
+                            mgr.active_rules().len());
+                    }
                 }
-
-                let request = CoapRequest::from_packet(packet, src);
-                let path = request.get_path();
-
-                println!("\n[CORECONF] {} {} /{} from {}",
-                    format_method(&request.message.header.code),
-                    request.message.payload.len(),
-                    path,
-                    src);
-
-                let response = if path == "c" {
-                    handle_coreconf_request(&mut coreconf_handler, &request)
-                } else {
-                    create_not_found(&request.message)
-                };
-
-                let response_bytes = response.to_bytes().unwrap_or_default();
-                mgmt_socket.send_to(&response_bytes, src)?;
-
-                println!("  Response: {:?}", response.header.code);
-
-                // Show current rules after management operation
-                let mgr = coreconf_handler.manager().read().unwrap();
-                println!("  Active rules: {} M-Rules + {} app rules",
-                    mgr.m_rules().rules().len(),
-                    mgr.active_rules().len());
+                Err(e) => {
+                    // Fallback: try to parse as raw CoAP (for compatibility)
+                    println!("\n[CORECONF] M-Rule decompression failed: {}, trying raw CoAP", e);
+                    if let Ok(packet) = Packet::from_bytes(&mgmt_buf[..len]) {
+                        if !matches!(packet.header.code, MessageClass::Empty) {
+                            let request = CoapRequest::from_packet(packet, src);
+                            let response = handle_coreconf_request(&mut coreconf_handler, &request);
+                            let response_bytes = response.to_bytes().unwrap_or_default();
+                            mgmt_socket.send_to(&response_bytes, src)?;
+                        }
+                    }
+                }
             }
         }
 
@@ -164,12 +210,13 @@ fn main() -> std::io::Result<()> {
 
             // Try to decompress
             match decompress_schc_packet(&data_buf[..len], &ruleset) {
-                Ok((rule_id, decompressed)) => {
+                Ok((rule_id, rule_id_length, decompressed)) => {
                     if rule_id != last_rule_id {
                         println!("  ** Rule changed: {} -> {} **", last_rule_id, rule_id);
                         last_rule_id = rule_id;
                     }
-                    println!("  Rule ID: {}", rule_id);
+                    
+                    println!("  Rule ID: {}/{}", rule_id, rule_id_length);
                     println!("  Decompressed: {} bytes", decompressed.len());
 
                     // Parse and display IPv6/UDP headers
@@ -196,11 +243,11 @@ fn main() -> std::io::Result<()> {
     Ok(())
 }
 
-fn decompress_schc_packet(compressed: &[u8], ruleset: &RuleSet) -> Result<(u32, Vec<u8>), String> {
+fn decompress_schc_packet(compressed: &[u8], ruleset: &RuleSet) -> Result<(u32, u8, Vec<u8>), String> {
     let rules: Vec<schc::Rule> = ruleset.rules.to_vec();
 
     match decompress_packet(compressed, &rules, Direction::Up, None) {
-        Ok(result) => Ok((result.rule_id, result.full_data)),
+        Ok(result) => Ok((result.rule_id, result.rule_id_length, result.full_data)),
         Err(e) => Err(format!("{:?}", e)),
     }
 }
@@ -351,4 +398,56 @@ fn content_format_to_coap(format: rust_coreconf::coap_types::ContentFormat) -> C
         rust_coreconf::coap_types::ContentFormat::YangInstancesCborSeq => CoapContentFormat::ApplicationCBOR,
         rust_coreconf::coap_types::ContentFormat::YangIdentifiersCbor => CoapContentFormat::ApplicationCBOR,
     }
+}
+
+/// Build an IPv6/UDP/CoAP packet for management response (Core -> Device)
+fn build_mgmt_response_packet(coap_payload: &[u8]) -> Vec<u8> {
+    // Fixed M-Rule addressing per draft (reversed for response):
+    // - Core (source): fe80::2
+    // - Device (dest): fe80::1
+    // - Port: 5683 (CoAP default)
+    let src_prefix: [u8; 8] = [0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+    let src_iid: [u8; 8] = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02]; // ::2 (Core)
+    let dst_prefix: [u8; 8] = [0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+    let dst_iid: [u8; 8] = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01]; // ::1 (Device)
+    
+    let mut packet = Vec::with_capacity(14 + 40 + 8 + coap_payload.len());
+
+    // Ethernet header (14 bytes)
+    packet.extend_from_slice(&[
+        0x00, 0x11, 0x22, 0x33, 0x44, 0x55,  // Destination MAC
+        0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB,  // Source MAC
+        0x86, 0xDD,                          // EtherType: IPv6
+    ]);
+
+    // IPv6 Header (40 bytes)
+    let version_tc_fl = (6u32 << 28) | 0; // Version 6, TC 0, FL 0
+    packet.extend_from_slice(&version_tc_fl.to_be_bytes());
+
+    // Payload Length (UDP header + CoAP)
+    let payload_length = (8 + coap_payload.len()) as u16;
+    packet.extend_from_slice(&payload_length.to_be_bytes());
+
+    // Next Header (17 = UDP), Hop Limit (64)
+    packet.push(17);
+    packet.push(64);
+
+    // Source Address (prefix + IID)
+    packet.extend_from_slice(&src_prefix);
+    packet.extend_from_slice(&src_iid);
+
+    // Destination Address (prefix + IID)
+    packet.extend_from_slice(&dst_prefix);
+    packet.extend_from_slice(&dst_iid);
+
+    // UDP Header (8 bytes)
+    packet.extend_from_slice(&5683u16.to_be_bytes()); // src port
+    packet.extend_from_slice(&5683u16.to_be_bytes()); // dst port
+    packet.extend_from_slice(&payload_length.to_be_bytes());
+    packet.extend_from_slice(&[0x00, 0x00]); // checksum (0 for now)
+
+    // CoAP payload
+    packet.extend_from_slice(coap_payload);
+
+    packet
 }

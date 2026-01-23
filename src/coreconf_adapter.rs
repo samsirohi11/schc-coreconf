@@ -89,7 +89,7 @@ impl SchcCoreconfHandler {
 
     /// Create with default SID file path
     pub fn with_default_sid(manager: SchcCoreconfManager) -> Result<Self> {
-        Self::new("samples/ietf-schc.sid", manager)
+        Self::new("samples/ietf-schc@2026-01-12.sid", manager)
     }
 
     /// Sync rules from manager to datastore
@@ -468,50 +468,67 @@ impl SchcCoreconfHandler {
         Ok(None)
     }
 
-    /// Parse RPC request from CBOR payload
+    /// Parse RPC request from CBOR payload (SID-encoded format only)
     fn parse_rpc_request(&self, payload: &[u8]) -> Result<RpcRequest> {
-        // Parse CBOR to determine RPC type
-        let value: Value = ciborium::from_reader(payload)
-            .map_err(|e| Error::Coreconf(format!("CBOR decode error: {}", e)))?;
+        use crate::rpc_builder::parse_duplicate_rule_rpc;
 
-        // Check for duplicate-rule RPC
-        if let Some(input) = value.get("input") {
-            let from = (
-                input
-                    .get("source-rule-id-value")
-                    .and_then(|v| v.as_u64())
-                    .ok_or_else(|| Error::Conversion("Missing source-rule-id-value".into()))?
-                    as u32,
-                input
-                    .get("source-rule-id-length")
-                    .and_then(|v| v.as_u64())
-                    .ok_or_else(|| Error::Conversion("Missing source-rule-id-length".into()))?
-                    as u8,
-            );
+        // Parse SID-encoded duplicate-rule RPC
+        match parse_duplicate_rule_rpc(payload) {
+            Ok(request) => {
+                // Convert entry modifications to Value format for manager
+                let mods_value = if request.modifications.is_empty() {
+                    None
+                } else {
+                    // Build entry array from modifications
+                    let entries: Vec<Value> = request.modifications
+                        .iter()
+                        .map(|m| {
+                            let mut entry = serde_json::Map::new();
+                            entry.insert(
+                                "entry-index".to_string(),
+                                Value::Number(m.entry_index.into()),
+                            );
 
-            let to = (
-                input
-                    .get("target-rule-id-value")
-                    .and_then(|v| v.as_u64())
-                    .ok_or_else(|| Error::Conversion("Missing target-rule-id-value".into()))?
-                    as u32,
-                input
-                    .get("target-rule-id-length")
-                    .and_then(|v| v.as_u64())
-                    .ok_or_else(|| Error::Conversion("Missing target-rule-id-length".into()))?
-                    as u8,
-            );
+                            if let Some(mo) = m.matching_operator {
+                                entry.insert(
+                                    "matching-operator-sid".to_string(),
+                                    Value::Number(mo.into()),
+                                );
+                            }
 
-            let modifications = input.get("modifications").cloned();
+                            if let Some(cda) = m.comp_decomp_action {
+                                entry.insert(
+                                    "comp-decomp-action-sid".to_string(),
+                                    Value::Number(cda.into()),
+                                );
+                            }
 
-            return Ok(RpcRequest::DuplicateRule {
-                from,
-                to,
-                modifications,
-            });
+                            if let Some(ref tv) = m.target_value {
+                                // Encode as base64 for JSON transport
+                                entry.insert(
+                                    "target-value-bytes".to_string(),
+                                    Value::String(base64::Engine::encode(
+                                        &base64::engine::general_purpose::STANDARD,
+                                        tv,
+                                    )),
+                                );
+                            }
+
+                            Value::Object(entry)
+                        })
+                        .collect();
+
+                    Some(serde_json::json!({ "entry": entries }))
+                };
+
+                Ok(RpcRequest::DuplicateRule {
+                    from: request.source,
+                    to: request.target,
+                    modifications: mods_value,
+                })
+            }
+            Err(e) => Err(Error::Coreconf(format!("Failed to parse RPC: {}", e))),
         }
-
-        Err(Error::Coreconf("Unknown RPC".into()))
     }
 
     /// Apply a create rule operation

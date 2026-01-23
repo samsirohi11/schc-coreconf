@@ -21,12 +21,17 @@ use coap_lite::{
 };
 use rust_coreconf::SidFile;
 use schc::{build_tree, compress_packet, Direction, Rule};
-use schc_coreconf::{load_sor_rules, MRuleSet, SchcCoreconfManager};
-use serde_json::json;
+use schc_coreconf::{
+    load_sor_rules, MRuleSet, SchcCoreconfManager,
+    mgmt_compression::MgmtCompressor,
+    rpc_builder::{build_duplicate_rule_rpc, EntryModification},
+    sor_loader::{mo_to_sid, cda_to_sid},
+};
+use schc::{MatchingOperator, CompressionAction};
 
-const M_RULES_PATH: &str = "samples/m-rules.json";
+const M_RULES_PATH: &str = "samples/m-rules.sor";
 const BASE_RULES_PATH: &str = "rules/base-ipv6-udp.sor";
-const SID_FILE_PATH: &str = "samples/ietf-schc.sid";
+const SID_FILE_PATH: &str = "samples/ietf-schc@2026-01-12.sid";
 const PACKETS_BEFORE_DERIVATION: usize = 5;
 
 fn main() -> std::io::Result<()> {
@@ -50,14 +55,17 @@ fn main() -> std::io::Result<()> {
     println!("            SCHC Device (IoT Endpoint)");
     println!("============================================================\n");
 
-    // Load M-Rules for CORECONF traffic compression
-    println!("Loading M-Rules from: {}", M_RULES_PATH);
-    let m_rules = MRuleSet::from_file(M_RULES_PATH).expect("Failed to load M-Rules");
-    println!("  Loaded {} M-Rules", m_rules.rules().len());
-
     // Load SID file for CORECONF parsing
     println!("Loading SID file: {}", SID_FILE_PATH);
     let sid_file = SidFile::from_file(SID_FILE_PATH).expect("Failed to load SID file");
+
+    // Load M-Rules for CORECONF traffic compression (from SOR format)
+    println!("Loading M-Rules from: {}", M_RULES_PATH);
+    let m_rules = MRuleSet::from_sor(M_RULES_PATH, &sid_file).expect("Failed to load M-Rules");
+    println!("  Loaded {} M-Rules", m_rules.rules().len());
+    
+    // Create management compressor (must be created before m_rules is moved to manager)
+    let mgmt_compressor = MgmtCompressor::new(&m_rules);
 
     // Load base application rules from SOR (CORECONF CBOR format)
     println!("Loading base rules from: {}", BASE_RULES_PATH);
@@ -137,9 +145,9 @@ fn main() -> std::io::Result<()> {
                     i + 1,
                     compressed.rule_id,
                     compressed.rule_id_length,
-                    packet.len(),
+                    packet.len() - 14, // Ethernet header
                     compressed.data.len(),
-                    (1.0 - compressed.data.len() as f64 / packet.len() as f64) * 100.0
+                    (1.0 - compressed.data.len() as f64 / (packet.len() - 14) as f64) * 100.0
                 );
 
                 // Send compressed packet to Core
@@ -168,71 +176,78 @@ fn main() -> std::io::Result<()> {
         base_rule_id, base_rule_id_length, derived_rule_id, derived_rule_id_length
     );
 
-    // Build modifications to make more fields "not-sent" based on constant values
-    // We'll set flow_label and source IID as not-sent since they're constant
-    let modifications = json!({
-        "entry": [
-            {
-                "field-id": "fid-ipv6-flowlabel",
-                "target-value": [{"index": 0, "value": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &flow_label.to_be_bytes()[1..4])}],
-                "matching-operator": "mo-equal",
-                "comp-decomp-action": "cda-not-sent"
-            },
-            {
-                "field-id": "fid-ipv6-deviid",
-                "target-value": [{"index": 0, "value": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, src_iid)}],
-                "matching-operator": "mo-equal",
-                "comp-decomp-action": "cda-not-sent"
-            },
-            {
-                "field-id": "fid-ipv6-appiid",
-                "target-value": [{"index": 0, "value": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, dst_iid)}],
-                "matching-operator": "mo-equal",
-                "comp-decomp-action": "cda-not-sent"
-            },
-            {
-                "field-id": "fid-udp-dev-port",
-                "target-value": [{"index": 0, "value": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, src_port.to_be_bytes())}],
-                "matching-operator": "mo-equal",
-                "comp-decomp-action": "cda-not-sent"
-            },
-            {
-                "field-id": "fid-udp-app-port",
-                "target-value": [{"index": 0, "value": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, dst_port.to_be_bytes())}],
-                "matching-operator": "mo-equal",
-                "comp-decomp-action": "cda-not-sent"
-            }
-        ]
-    });
+    // Build modifications using entry-index addressing (more efficient)
+    // Entry indices from base-ipv6-udp.sor:
+    //   2 = IPV6.FL (flow label)
+    //   7 = IPV6.DEV_IID
+    //   9 = IPV6.APP_IID  
+    //   10 = UDP.DEV_PORT
+    //   11 = UDP.APP_PORT
+    let modifications = vec![
+        EntryModification::new(2)  // IPV6.FL
+            .with_target_value_bytes(flow_label.to_be_bytes()[1..4].to_vec())
+            .with_mo(mo_to_sid(&MatchingOperator::Equal))
+            .with_cda(cda_to_sid(&CompressionAction::NotSent)),
+        EntryModification::new(7)  // IPV6.DEV_IID
+            .with_target_value_bytes(src_iid.to_vec())
+            .with_mo(mo_to_sid(&MatchingOperator::Equal))
+            .with_cda(cda_to_sid(&CompressionAction::NotSent)),
+        EntryModification::new(9)  // IPV6.APP_IID
+            .with_target_value_bytes(dst_iid.to_vec())
+            .with_mo(mo_to_sid(&MatchingOperator::Equal))
+            .with_cda(cda_to_sid(&CompressionAction::NotSent)),
+        EntryModification::new(10)  // UDP.DEV_PORT
+            .with_target_value_bytes(src_port.to_be_bytes().to_vec())
+            .with_mo(mo_to_sid(&MatchingOperator::Equal))
+            .with_cda(cda_to_sid(&CompressionAction::NotSent)),
+        EntryModification::new(11)  // UDP.APP_PORT
+            .with_target_value_bytes(dst_port.to_be_bytes().to_vec())
+            .with_mo(mo_to_sid(&MatchingOperator::Equal))
+            .with_cda(cda_to_sid(&CompressionAction::NotSent)),
+    ];
 
-    // Build duplicate-rule RPC request
-    let rpc_input = json!({
-        "input": {
-            "source-rule-id-value": base_rule_id,
-            "source-rule-id-length": base_rule_id_length,
-            "target-rule-id-value": derived_rule_id,
-            "target-rule-id-length": derived_rule_id_length,
-            "modifications": modifications
-        }
-    });
+    // Build SID-encoded duplicate-rule RPC (compact encoding)
+    let rpc_cbor = build_duplicate_rule_rpc(
+        (base_rule_id, base_rule_id_length),
+        (derived_rule_id, derived_rule_id_length),
+        Some(&modifications),
+    );
 
-    // Serialize to CBOR
-    let mut rpc_cbor = Vec::new();
-    ciborium::into_writer(&rpc_input, &mut rpc_cbor).expect("Failed to serialize RPC");
+    println!("RPC payload size: {} bytes (SID-encoded)", rpc_cbor.len());
 
-    // Send POST request to Core
-    let response = send_coap_post(&mgmt_socket, &mut message_id, &rpc_cbor)?;
+    // Send POST request to Core (compressed with M-Rules)
+    let response = send_coap_post(&mgmt_socket, &mut message_id, &rpc_cbor, &mgmt_compressor)?;
 
     match response.header.code {
         MessageClass::Response(ResponseType::Changed) => {
             println!("duplicate-rule RPC successful!");
 
-            // Apply the same derivation locally
+            // Build JSON modifications for local manager (same format expected by manager)
+            let local_mods = serde_json::json!({
+                "entry": modifications.iter().map(|m| {
+                    let mut entry = serde_json::Map::new();
+                    entry.insert("entry-index".to_string(), serde_json::Value::Number(m.entry_index.into()));
+                    if let Some(mo) = m.matching_operator {
+                        entry.insert("matching-operator-sid".to_string(), serde_json::Value::Number(mo.into()));
+                    }
+                    if let Some(cda) = m.comp_decomp_action {
+                        entry.insert("comp-decomp-action-sid".to_string(), serde_json::Value::Number(cda.into()));
+                    }
+                    if let Some(ref tv) = m.target_value {
+                        entry.insert("target-value-bytes".to_string(), 
+                            serde_json::Value::String(base64::Engine::encode(
+                                &base64::engine::general_purpose::STANDARD, tv)));
+                    }
+                    serde_json::Value::Object(entry)
+                }).collect::<Vec<_>>()
+            });
+
+            // Apply the same derivation with modifications locally
             manager
                 .duplicate_rule(
                     (base_rule_id, base_rule_id_length),
                     (derived_rule_id, derived_rule_id_length),
-                    Some(&modifications),
+                    Some(&local_mods),
                 )
                 .expect("Failed to duplicate rule locally");
 
@@ -294,9 +309,9 @@ fn main() -> std::io::Result<()> {
                     compressed.rule_id,
                     compressed.rule_id_length,
                     improvement,
-                    packet.len(),
+                    packet.len() - 14, // Ethernet header
                     compressed.data.len(),
-                    (1.0 - compressed.data.len() as f64 / packet.len() as f64) * 100.0
+                    (1.0 - compressed.data.len() as f64 / (packet.len() - 14) as f64) * 100.0
                 );
 
                 // Send compressed packet to Core
@@ -375,30 +390,111 @@ fn build_ipv6_udp_packet(
     packet
 }
 
-/// Send a CoAP POST request and wait for response
-fn send_coap_post(socket: &UdpSocket, message_id: &mut u16, payload: &[u8]) -> std::io::Result<Packet> {
-    let mut packet = Packet::new();
-    packet.header.message_id = *message_id;
-    *message_id = message_id.wrapping_add(1);
-    packet.header.code = MessageClass::Request(RequestType::Post);
-    packet.header.set_type(MessageType::Confirmable);
-    packet.set_token(vec![0x01]);
-    packet.add_option(coap_lite::CoapOption::UriPath, b"c".to_vec());
-    // Use Content-Format 313 (application/yang-instances+cbor-seq) for CORECONF POST
-    // coap_lite's ContentFormat enum doesn't have this, so we set it manually
-    packet.add_option(coap_lite::CoapOption::ContentFormat, vec![0x01, 0x39]); // 313 in big-endian
-    packet.payload = payload.to_vec();
+/// Build an IPv6/UDP/CoAP packet for management traffic
+fn build_mgmt_packet(coap_payload: &[u8]) -> Vec<u8> {
+    // Fixed M-Rule addressing per draft:
+    // - Device: fe80::1
+    // - Core: fe80::2
+    // - Port: 5683 (CoAP default)
+    let src_prefix: [u8; 8] = [0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+    let src_iid: [u8; 8] = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01]; // ::1
+    let dst_prefix: [u8; 8] = [0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+    let dst_iid: [u8; 8] = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02]; // ::2
+    
+    let mut packet = Vec::with_capacity(14 + 40 + 8 + coap_payload.len());
 
-    let bytes = packet.to_bytes().map_err(|e| {
+    // Ethernet header (14 bytes)
+    packet.extend_from_slice(&[
+        0x00, 0x11, 0x22, 0x33, 0x44, 0x55,  // Destination MAC
+        0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB,  // Source MAC
+        0x86, 0xDD,                          // EtherType: IPv6
+    ]);
+
+    // IPv6 Header (40 bytes)
+    let version_tc_fl = (6u32 << 28) | 0; // Version 6, TC 0, FL 0
+    packet.extend_from_slice(&version_tc_fl.to_be_bytes());
+
+    // Payload Length (UDP header + CoAP)
+    let payload_length = (8 + coap_payload.len()) as u16;
+    packet.extend_from_slice(&payload_length.to_be_bytes());
+
+    // Next Header (17 = UDP), Hop Limit (64)
+    packet.push(17);
+    packet.push(64);
+
+    // Source Address (prefix + IID)
+    packet.extend_from_slice(&src_prefix);
+    packet.extend_from_slice(&src_iid);
+
+    // Destination Address (prefix + IID)
+    packet.extend_from_slice(&dst_prefix);
+    packet.extend_from_slice(&dst_iid);
+
+    // UDP Header (8 bytes)
+    packet.extend_from_slice(&5683u16.to_be_bytes()); // src port
+    packet.extend_from_slice(&5683u16.to_be_bytes()); // dst port
+    packet.extend_from_slice(&payload_length.to_be_bytes());
+    packet.extend_from_slice(&[0x00, 0x00]); // checksum (0 for now)
+
+    // CoAP payload
+    packet.extend_from_slice(coap_payload);
+
+    packet
+}
+
+/// Send a CoAP POST request compressed with M-Rules and wait for response
+fn send_coap_post(
+    socket: &UdpSocket,
+    message_id: &mut u16,
+    payload: &[u8],
+    mgmt_compressor: &MgmtCompressor,
+) -> std::io::Result<Packet> {
+    let mut coap_packet = Packet::new();
+    coap_packet.header.message_id = *message_id;
+    *message_id = message_id.wrapping_add(1);
+    coap_packet.header.code = MessageClass::Request(RequestType::Post);
+    coap_packet.header.set_type(MessageType::Confirmable);
+    coap_packet.set_token(vec![0x01]);
+    coap_packet.add_option(coap_lite::CoapOption::UriPath, b"c".to_vec());
+    // Use Content-Format 313 (application/yang-instances+cbor-seq) for CORECONF POST
+    coap_packet.add_option(coap_lite::CoapOption::ContentFormat, vec![0x01, 0x39]);
+    coap_packet.payload = payload.to_vec();
+
+    let coap_bytes = coap_packet.to_bytes().map_err(|e| {
         std::io::Error::other(e.to_string())
     })?;
-    socket.send(&bytes)?;
 
-    // Wait for response
+    // Build full IPv6/UDP/CoAP packet
+    let full_packet = build_mgmt_packet(&coap_bytes);
+    
+    // Compress with M-Rules
+    let compressed = mgmt_compressor.compress(&full_packet, Direction::Up)
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    
+    println!("  MGMT compressed: {} bytes -> {} bytes ({:.1}% compression)",
+        full_packet.len() - 14, // exclude Ethernet header
+        compressed.len(),
+        (1.0 - compressed.len() as f64 / (full_packet.len() - 14) as f64) * 100.0
+    );
+
+    socket.send(&compressed)?;
+
+    // Wait for response (also compressed)
     let mut buf = [0u8; 1500];
     let len = socket.recv(&mut buf)?;
 
-    Packet::from_bytes(&buf[..len]).map_err(|e| {
+    // Decompress response with M-Rules
+    let decompressed = mgmt_compressor.decompress(&buf[..len], Direction::Down)
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    
+    // Extract CoAP packet from decompressed IPv6/UDP packet
+    // Skip: Ethernet (14) + IPv6 (40) + UDP (8) = 62 bytes
+    if decompressed.len() < 62 {
+        return Err(std::io::Error::other("Decompressed packet too small"));
+    }
+    let coap_response_bytes = &decompressed[62..];
+
+    Packet::from_bytes(coap_response_bytes).map_err(|e| {
         std::io::Error::other(e.to_string())
     })
 }

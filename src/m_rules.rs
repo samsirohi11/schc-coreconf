@@ -5,6 +5,8 @@
 //! of Rules (SoR), and M-Rules themselves cannot be modified via CORECONF.
 
 use crate::error::{Error, Result};
+use crate::sor_loader::load_sor_rules;
+use rust_coreconf::SidFile;
 use schc::rule::{Rule, RuleSet};
 use std::fs;
 
@@ -22,6 +24,27 @@ impl MRuleSet {
     pub fn from_file(path: &str) -> Result<Self> {
         let content = fs::read_to_string(path)?;
         Self::from_json(&content)
+    }
+
+    /// Create M-Rules from a SOR (CORECONF CBOR) file
+    ///
+    /// This is the preferred method for production as SOR format uses
+    /// SID-based encoding which is more compact than JSON.
+    pub fn from_sor(path: &str, sid_file: &SidFile) -> Result<Self> {
+        let rules = load_sor_rules(path, sid_file)?;
+
+        if rules.is_empty() {
+            return Err(Error::Coreconf("No M-Rules found in SOR file".into()));
+        }
+
+        // Determine reserved range from loaded rules
+        let min_id = rules.iter().map(|r| r.rule_id).min().unwrap_or(0);
+        let max_id = rules.iter().map(|r| r.rule_id).max().unwrap_or(15);
+
+        Ok(Self {
+            reserved_range: (min_id, max_id),
+            rules,
+        })
     }
 
     /// Create M-Rules from JSON string

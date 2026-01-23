@@ -432,10 +432,61 @@ impl SchcCoreconfManager {
     }
 
     /// Apply iPATCH-style modifications to a rule
+    /// 
+    /// Supports both:
+    /// - Field-ID based: `{"entry": [{"field-id": "fid-ipv6-flowlabel", ...}]}`
+    /// - Entry-index based: `{"entry": [{"entry-index": 2, "matching-operator-sid": 2900, ...}]}`
     fn apply_rule_modifications(mut rule: Rule, mods: &Value) -> Result<Rule> {
         // Handle field-level modifications
         if let Some(entries) = mods.get("entry").and_then(|e| e.as_array()) {
             for entry_mod in entries {
+                // Check for entry-index based modification (SID format)
+                if let Some(entry_idx) = entry_mod.get("entry-index").and_then(|i| i.as_u64()) {
+                    let idx = entry_idx as usize;
+                    if idx < rule.compression.len() {
+                        let field = &mut rule.compression[idx];
+                        
+                        // Apply MO by SID
+                        if let Some(mo_sid) = entry_mod.get("matching-operator-sid").and_then(|m| m.as_i64()) {
+                            use schc::rule::MatchingOperator;
+                            // Map SID to MatchingOperator
+                            field.mo = match mo_sid {
+                                2900 => MatchingOperator::Equal,
+                                2901 => MatchingOperator::Ignore,
+                                2902 => MatchingOperator::MatchMapping,
+                                2903 => MatchingOperator::Msb(field.mo_val.unwrap_or(0)),
+                                _ => field.mo,
+                            };
+                        }
+                        
+                        // Apply CDA by SID
+                        if let Some(cda_sid) = entry_mod.get("comp-decomp-action-sid").and_then(|c| c.as_i64()) {
+                            use schc::rule::CompressionAction;
+                            field.cda = match cda_sid {
+                                2920 => CompressionAction::NotSent,
+                                2921 => CompressionAction::ValueSent,
+                                2922 => CompressionAction::MappingSent,
+                                2923 => CompressionAction::Lsb,
+                                2924 => CompressionAction::Compute,
+                                _ => field.cda,
+                            };
+                        }
+                        
+                        // Apply target value from bytes
+                        if let Some(tv_b64) = entry_mod.get("target-value-bytes").and_then(|t| t.as_str()) {
+                            use base64::Engine;
+                            if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(tv_b64) {
+                                field.tv = Some(Self::bytes_to_internal_tv(&bytes, field.fid));
+                                if let Err(e) = field.parse_tv() {
+                                    log::warn!("Failed to parse target value for entry {}: {}", idx, e);
+                                }
+                            }
+                        }
+                    }
+                    continue;
+                }
+                
+                // Fall back to field-id based modification
                 if let Some(fid_str) = entry_mod.get("field-id").and_then(|f| f.as_str()) {
                     // Find matching field in rule
                     use crate::identities::yang_fid_to_schc;
@@ -583,6 +634,7 @@ mod tests {
                 mo: MatchingOperator::Equal,
                 cda: CompressionAction::NotSent,
                 mo_val: None,
+                di: None,
                 parsed_tv: None,
             }],
         }
@@ -699,6 +751,7 @@ mod tests {
                 mo: MatchingOperator::Ignore,
                 cda: CompressionAction::ValueSent,
                 mo_val: None,
+                di: None,
                 parsed_tv: None,
             }],
         }];

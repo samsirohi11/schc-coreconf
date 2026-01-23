@@ -4,6 +4,7 @@
 //! with extensions from draft-toutain-schc-coreconf-management.
 
 use schc::field_id::FieldId;
+use schc::parser::Direction;
 use schc::rule::{Field, MatchingOperator, Rule};
 use serde_json::{json, Value};
 
@@ -198,9 +199,21 @@ fn yang_entry_to_field(entry: &Value) -> Result<Field> {
     // Parse target value
     let tv = parse_yang_target_value(&entry["target-value"], fid)?;
 
+    // Parse direction indicator
+    let di_str = entry["direction-indicator"]
+        .as_str()
+        .unwrap_or("di-bidirectional");
+    
+    let di = match di_str {
+        "di-up" => Some(Direction::Up),
+        "di-down" => Some(Direction::Down),
+        _ => None, // Bidirectional
+    };
+
     Ok(Field {
         fid,
         fl,
+        di,
         tv,
         mo,
         cda,
@@ -292,7 +305,11 @@ fn field_to_yang_entry(field: &Field) -> Result<Value> {
     let mut entry = json!({
         "field-id": schc_fid_to_yang(field.fid),
         "field-position": 1,
-        "direction-indicator": "di-bidirectional",
+        "direction-indicator": match field.di {
+            Some(Direction::Up) => "di-up",
+            Some(Direction::Down) => "di-down",
+            None => "di-bidirectional",
+        },
         "matching-operator": schc_mo_to_yang(&field.mo),
         "comp-decomp-action": schc_cda_to_yang(&field.cda),
     });
@@ -452,6 +469,7 @@ mod tests {
                 mo: MatchingOperator::Equal,
                 cda: CompressionAction::NotSent,
                 mo_val: None,
+                di: None,
                 parsed_tv: None,
             }],
         };

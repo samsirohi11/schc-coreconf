@@ -38,7 +38,7 @@ fn main() {
                 .position(|a| a == "--sid")
                 .and_then(|i| args.get(i + 1))
                 .map(|s| s.as_str())
-                .unwrap_or("samples/ietf-schc.sid");
+                .unwrap_or("samples/ietf-schc@2026-01-12.sid");
             sor_to_json(&args[2], sid_file_path);
         }
         "display" => {

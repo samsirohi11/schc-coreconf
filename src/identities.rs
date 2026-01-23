@@ -217,7 +217,7 @@ pub fn yang_cda_to_schc(yang_cda: &str) -> Result<CompressionAction> {
     match cda {
         "cda-not-sent" => Ok(CompressionAction::NotSent),
         "cda-value-sent" => Ok(CompressionAction::ValueSent),
-        "cda-lsb" => Ok(CompressionAction::Lsb(0)), // LSB value set separately
+        "cda-lsb" => Ok(CompressionAction::Lsb), // LSB value set separately
         "cda-mapping-sent" => Ok(CompressionAction::MappingSent),
         "cda-compute" => Ok(CompressionAction::Compute),
         "cda-deviid" => Ok(CompressionAction::NotSent), // Device IID computed
@@ -231,7 +231,7 @@ pub fn schc_cda_to_yang(cda: &CompressionAction) -> &'static str {
     match cda {
         CompressionAction::NotSent => "cda-not-sent",
         CompressionAction::ValueSent => "cda-value-sent",
-        CompressionAction::Lsb(_) => "cda-lsb",
+        CompressionAction::Lsb => "cda-lsb",
         CompressionAction::MappingSent => "cda-mapping-sent",
         CompressionAction::Compute => "cda-compute",
     }
