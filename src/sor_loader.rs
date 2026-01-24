@@ -40,11 +40,15 @@ const DELTA_FIELD_ID: i64 = 3;             // 2623
 const DELTA_FIELD_LENGTH: i64 = 4;         // 2624
 #[allow(dead_code)]
 const DELTA_FIELD_LENGTH_VALUE: i64 = 5;   // 2625
-#[allow(dead_code)]
 const DELTA_DIRECTION: i64 = 6;            // 2626
 #[allow(dead_code)]
 const DELTA_FIELD_POSITION: i64 = 7;       // 2627
 const DELTA_TARGET_VALUE: i64 = 8;         // 2628
+
+// Identity SIDs for Direction Indicator
+const SID_DI_BIDIRECTIONAL: i64 = 2880;
+const SID_DI_DOWN: i64 = 2881;
+const SID_DI_UP: i64 = 2882;
 const DELTA_MO: i64 = 11;                  // 2631
 const DELTA_MO_VALUE: i64 = 12;            // 2632
 const DELTA_CDA: i64 = 15;                 // 2635
@@ -131,23 +135,30 @@ fn parse_cbor_value(cbor_value: &CborValue, sid_file: &SidFile) -> Result<Vec<Ru
 fn parse_rule(rule_value: &CborValue, sid_file: &SidFile) -> Result<Rule> {
     let rule_map = rule_value.as_map()
         .ok_or_else(|| Error::Coreconf("Rule is not a map".to_string()))?;
-    
+
     // Extract rule metadata
     let rule_id_length = find_integer_by_delta(rule_map, DELTA_RULE_ID_LENGTH)
         .unwrap_or(8) as u8;
-    
+
     let rule_id_value = find_integer_by_delta(rule_map, DELTA_RULE_ID_VALUE)
         .unwrap_or(0) as u32;
-    
+
     // Parse entries (fields)
     let entries = find_value_by_delta(rule_map, DELTA_ENTRY);
-    
+
     let mut compression = Vec::new();
     if let Some(entries_value) = entries {
         if let Some(entries_array) = entries_value.as_array() {
             for entry in entries_array {
                 match parse_field_entry(entry, sid_file) {
-                    Ok(field) => compression.push(field),
+                    Ok(mut field) => {
+                        // Parse the target value to populate parsed_tv
+                        // This is needed for the tree builder and compressor
+                        if let Err(e) = field.parse_tv() {
+                            log::warn!("Failed to parse TV for field {:?}: {}", field.fid, e);
+                        }
+                        compression.push(field);
+                    }
                     Err(e) => {
                         log::debug!("Skipping field: {}", e);
                     }
@@ -155,7 +166,7 @@ fn parse_rule(rule_value: &CborValue, sid_file: &SidFile) -> Result<Rule> {
             }
         }
     }
-    
+
     Ok(Rule {
         rule_id: rule_id_value,
         rule_id_length,
@@ -186,35 +197,39 @@ fn parse_normal_field_entry(
     // Field ID (delta +3 = 2623, identityref)
     let fid_sid = find_integer_by_delta(entry_map, DELTA_FIELD_ID)
         .ok_or_else(|| Error::Coreconf("Field ID not found".to_string()))?;
-    
+
     let fid = sid_to_field_id(fid_sid, sid_file)?;
-    
+
     // Field Length (delta +4 = 2624)
     let fl = find_integer_by_delta(entry_map, DELTA_FIELD_LENGTH)
         .map(|v| v as u16);
-    
+
+    // Direction Indicator (delta +6 = 2626, identityref)
+    let di = find_integer_by_delta(entry_map, DELTA_DIRECTION)
+        .and_then(sid_to_direction);
+
     // Target Value (delta +8 = 2628)
     let tv = parse_target_value(entry_map, DELTA_TARGET_VALUE);
-    
+
     // Matching Operator (delta +11 = 2631, identityref)
     let mo_sid = find_integer_by_delta(entry_map, DELTA_MO)
         .ok_or_else(|| Error::Coreconf("MO not found".to_string()))?;
-    
+
     // MO Value (delta +12 = 2632)
     let mo_val = parse_mo_value(entry_map);
-    
+
     let mo = sid_to_mo(mo_sid, mo_val)?;
-    
+
     // Compression Action (delta +15 = 2635, identityref)
     let cda_sid = find_integer_by_delta(entry_map, DELTA_CDA)
         .ok_or_else(|| Error::Coreconf("CDA not found".to_string()))?;
-    
+
     let cda = sid_to_cda(cda_sid, mo_val)?;
-    
+
     Ok(Field {
         fid,
         fl,
-        di: None, // Logic for DI parsing can be added later if needed
+        di,
         tv,
         mo,
         mo_val,
@@ -229,41 +244,45 @@ fn parse_universal_option_entry(
 ) -> Result<Field> {
     // Universal options use negative deltas
     // space-id: -4, option-num: -5, FL: -11, DI: -12, MO: -9, CDA: -16
-    
+
     let option_num = find_integer_by_neg_delta(entry_map, 5);
-    
+
     // For universal options, create a CoAP option field ID based on option number
     let fid = if let Some(opt_num) = option_num {
         coap_option_to_field_id(opt_num as u16)
     } else {
         return Err(Error::Coreconf("Universal option without option number".to_string()));
     };
-    
+
     // Field Length (negative delta -11)
     let fl = find_integer_by_neg_delta(entry_map, 11).map(|v| v as u16);
-    
+
+    // Direction Indicator (negative delta -12)
+    let di = find_integer_by_neg_delta(entry_map, 12)
+        .and_then(sid_to_direction);
+
     // Target Value (negative delta -3)
     let tv = parse_target_value_neg(entry_map, 3);
-    
+
     // MO (negative delta -9)
     let mo_sid = find_integer_by_neg_delta(entry_map, 9)
         .ok_or_else(|| Error::Coreconf("MO not found in universal option".to_string()))?;
-    
+
     // MO Value (negative delta -8)
     let mo_val = parse_mo_value_neg(entry_map);
-    
+
     let mo = sid_to_mo(mo_sid, mo_val)?;
-    
+
     // CDA (negative delta -16)
     let cda_sid = find_integer_by_neg_delta(entry_map, 16)
         .ok_or_else(|| Error::Coreconf("CDA not found in universal option".to_string()))?;
-    
+
     let cda = sid_to_cda(cda_sid, mo_val)?;
-    
+
     Ok(Field {
         fid,
         fl,
-        di: None,
+        di,
         tv,
         mo,
         mo_val,
@@ -449,14 +468,15 @@ fn sid_to_field_id(sid: i64, _sid_file: &SidFile) -> Result<FieldId> {
         2846 => Ok(FieldId::CoapMid),
         2847 => Ok(FieldId::CoapToken),
         
-        // CoAP options
-        2880 => Ok(FieldId::CoapUriPath),
-        2881 => Ok(FieldId::CoapContentFormat),
-        2882 => Ok(FieldId::CoapUriHost),
-        2883 => Ok(FieldId::CoapUriPort),
-        2884 => Ok(FieldId::CoapUriQuery),
-        2885 => Ok(FieldId::CoapAccept),
-        
+        // CoAP options: Note that generic CoAP options (Uri-Path, Content-Format, etc.)
+        // do not have dedicated SIDs in the ietf-schc YANG model.
+        // They should be encoded using the "universal option" format with CoAP option numbers.
+        // SIDs 2880-2882 are actually Direction Indicator identities:
+        //   2880 = di-bidirectional
+        //   2881 = di-down
+        //   2882 = di-up
+        // For now, CoAP options are not supported in SOR format - use JSON rules instead.
+
         _ => Err(Error::Coreconf(format!("Unknown field SID: {}", sid))),
     }
 }
@@ -496,6 +516,15 @@ fn sid_to_cda(sid: i64, _mo_val: Option<u8>) -> Result<CompressionAction> {
     }
 }
 
+fn sid_to_direction(sid: i64) -> Option<schc::Direction> {
+    match sid {
+        SID_DI_UP => Some(schc::Direction::Up),
+        SID_DI_DOWN => Some(schc::Direction::Down),
+        SID_DI_BIDIRECTIONAL => None, // Bidirectional means applies to both directions
+        _ => None, // Unknown direction, treat as bidirectional
+    }
+}
+
 // =============================================================================
 // Reverse Mappings (FieldId/MO/CDA -> SID)
 // =============================================================================
@@ -529,14 +558,17 @@ pub fn field_id_to_sid(fid: FieldId) -> Option<i64> {
         FieldId::CoapMid => Some(2846),
         FieldId::CoapToken => Some(2847),
         
-        // CoAP options (using universal option encoding would use different SIDs)
-        FieldId::CoapUriPath => Some(2880),       // URI-Path option
-        FieldId::CoapContentFormat => Some(2881), // Content-Format option
-        FieldId::CoapUriHost => Some(2882),
-        FieldId::CoapUriPort => Some(2883),
-        FieldId::CoapUriQuery => Some(2884),
-        FieldId::CoapAccept => Some(2885),
-        
+        // CoAP options do not have dedicated field-id SIDs in ietf-schc.
+        // They should be encoded using the universal option format with CoAP option numbers.
+        // These fields will return None, causing them to be skipped in SOR encoding.
+        // Use JSON format for rules that contain CoAP options.
+        FieldId::CoapUriPath
+        | FieldId::CoapContentFormat
+        | FieldId::CoapUriHost
+        | FieldId::CoapUriPort
+        | FieldId::CoapUriQuery
+        | FieldId::CoapAccept => None,
+
         _ => None, // Not all fields have SIDs
     }
 }

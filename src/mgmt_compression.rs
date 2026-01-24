@@ -41,7 +41,7 @@ impl MgmtCompressor {
     pub fn compress(&self, packet: &[u8], direction: Direction) -> Result<Vec<u8>> {
         let tree = build_tree(&self.m_rules);
 
-        match compress_packet(&tree, packet, direction, &self.m_rules, true) {
+        match compress_packet(&tree, packet, direction, &self.m_rules, false) {
             Ok(compressed) => {
                 log::debug!(
                     "MGMT compressed: {} bytes -> {} bytes (rule {}/{})",

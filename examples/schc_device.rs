@@ -29,7 +29,9 @@ use schc_coreconf::{
 };
 use schc::{MatchingOperator, CompressionAction};
 
-const M_RULES_PATH: &str = "samples/m-rules.sor";
+// Use JSON for M-Rules as it properly contains CoAP options (URI_PATH, CONTENT_FORMAT)
+// SOR encoding for CoAP options is not yet fully implemented
+const M_RULES_PATH: &str = "samples/m-rules.json";
 const BASE_RULES_PATH: &str = "rules/base-ipv6-udp.sor";
 const SID_FILE_PATH: &str = "samples/ietf-schc@2026-01-12.sid";
 const PACKETS_BEFORE_DERIVATION: usize = 5;
@@ -59,9 +61,10 @@ fn main() -> std::io::Result<()> {
     println!("Loading SID file: {}", SID_FILE_PATH);
     let sid_file = SidFile::from_file(SID_FILE_PATH).expect("Failed to load SID file");
 
-    // Load M-Rules for CORECONF traffic compression (from SOR format)
+    // Load M-Rules for CORECONF traffic compression (from JSON format)
+    // Using JSON because SOR encoding doesn't yet fully support CoAP options
     println!("Loading M-Rules from: {}", M_RULES_PATH);
-    let m_rules = MRuleSet::from_sor(M_RULES_PATH, &sid_file).expect("Failed to load M-Rules");
+    let m_rules = MRuleSet::from_file(M_RULES_PATH).expect("Failed to load M-Rules");
     println!("  Loaded {} M-Rules", m_rules.rules().len());
     
     // Create management compressor (must be created before m_rules is moved to manager)
@@ -392,15 +395,24 @@ fn build_ipv6_udp_packet(
 
 /// Build an IPv6/UDP/CoAP packet for management traffic
 fn build_mgmt_packet(coap_payload: &[u8]) -> Vec<u8> {
-    // Fixed M-Rule addressing per draft:
+    // Fixed M-Rule addressing per draft-toutain-schc-coreconf-management:
     // - Device: fe80::1
     // - Core: fe80::2
-    // - Port: 5683 (CoAP default)
+    // - Device Port: 3865 (per M-Rules)
+    // - App Port: 5683 (CoAP default)
+    // - Traffic Class: 1 (DSCP for CORECONF)
+    // - Flow Label: 0x23456 (144470, per M-Rules)
     let src_prefix: [u8; 8] = [0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
     let src_iid: [u8; 8] = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01]; // ::1
     let dst_prefix: [u8; 8] = [0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
     let dst_iid: [u8; 8] = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02]; // ::2
-    
+
+    // M-Rule constants
+    const TRAFFIC_CLASS: u32 = 1;      // TC = 1 per M-Rules
+    const FLOW_LABEL: u32 = 0x23456;   // FL = 144470 per M-Rules
+    const DEV_PORT: u16 = 3865;        // Device port per M-Rules
+    const APP_PORT: u16 = 5683;        // CoAP port
+
     let mut packet = Vec::with_capacity(14 + 40 + 8 + coap_payload.len());
 
     // Ethernet header (14 bytes)
@@ -411,7 +423,8 @@ fn build_mgmt_packet(coap_payload: &[u8]) -> Vec<u8> {
     ]);
 
     // IPv6 Header (40 bytes)
-    let version_tc_fl = (6u32 << 28) | 0; // Version 6, TC 0, FL 0
+    // Version (4 bits) = 6, Traffic Class (8 bits), Flow Label (20 bits)
+    let version_tc_fl = (6u32 << 28) | (TRAFFIC_CLASS << 20) | (FLOW_LABEL & 0xFFFFF);
     packet.extend_from_slice(&version_tc_fl.to_be_bytes());
 
     // Payload Length (UDP header + CoAP)
@@ -431,8 +444,8 @@ fn build_mgmt_packet(coap_payload: &[u8]) -> Vec<u8> {
     packet.extend_from_slice(&dst_iid);
 
     // UDP Header (8 bytes)
-    packet.extend_from_slice(&5683u16.to_be_bytes()); // src port
-    packet.extend_from_slice(&5683u16.to_be_bytes()); // dst port
+    packet.extend_from_slice(&DEV_PORT.to_be_bytes()); // src port (device)
+    packet.extend_from_slice(&APP_PORT.to_be_bytes()); // dst port (CoAP)
     packet.extend_from_slice(&payload_length.to_be_bytes());
     packet.extend_from_slice(&[0x00, 0x00]); // checksum (0 for now)
 
@@ -454,7 +467,8 @@ fn send_coap_post(
     *message_id = message_id.wrapping_add(1);
     coap_packet.header.code = MessageClass::Request(RequestType::Post);
     coap_packet.header.set_type(MessageType::Confirmable);
-    coap_packet.set_token(vec![0x01]);
+    // M-Rules expect TKL=0 (no token) for management packets
+    coap_packet.set_token(vec![]);
     coap_packet.add_option(coap_lite::CoapOption::UriPath, b"c".to_vec());
     // Use Content-Format 313 (application/yang-instances+cbor-seq) for CORECONF POST
     coap_packet.add_option(coap_lite::CoapOption::ContentFormat, vec![0x01, 0x39]);
@@ -486,13 +500,14 @@ fn send_coap_post(
     // Decompress response with M-Rules
     let decompressed = mgmt_compressor.decompress(&buf[..len], Direction::Down)
         .map_err(|e| std::io::Error::other(e.to_string()))?;
-    
+
     // Extract CoAP packet from decompressed IPv6/UDP packet
-    // Skip: Ethernet (14) + IPv6 (40) + UDP (8) = 62 bytes
-    if decompressed.len() < 62 {
+    // SCHC decompression does NOT include Ethernet header
+    // Skip: IPv6 (40) + UDP (8) = 48 bytes
+    if decompressed.len() < 48 {
         return Err(std::io::Error::other("Decompressed packet too small"));
     }
-    let coap_response_bytes = &decompressed[62..];
+    let coap_response_bytes = &decompressed[48..];
 
     Packet::from_bytes(coap_response_bytes).map_err(|e| {
         std::io::Error::other(e.to_string())

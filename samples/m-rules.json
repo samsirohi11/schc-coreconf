@@ -229,7 +229,7 @@
     "Compression": [
       {
         "FID": "IPV6.VER",
-        " FL": 4,
+        "FL": 4,
         "TV": 6,
         "MO": "equal",
         "CDA": "not-sent"
@@ -344,7 +344,7 @@
       },
       {
         "FID": "COAP.URI_PATH",
-        " FL": 8,
+        "FL": 8,
         "TV": "c",
         "MO": "equal",
         "CDA": "not-sent"
@@ -365,7 +365,7 @@
     "Compression": [
       {
         "FID": "IPV6.VER",
-        " FL": 4,
+        "FL": 4,
         "TV": 6,
         "MO": "equal",
         "CDA": "not-sent"

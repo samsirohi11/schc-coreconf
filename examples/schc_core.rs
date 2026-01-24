@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use coap_lite::{
-    CoapRequest, ContentFormat as CoapContentFormat, MessageClass, Packet, RequestType,
+    CoapRequest, ContentFormat as CoapContentFormat, MessageClass, MessageType, Packet, RequestType,
     ResponseType,
 };
 use rust_coreconf::SidFile;
@@ -28,7 +28,9 @@ use schc_coreconf::{
     mgmt_compression::MgmtCompressor,
 };
 
-const M_RULES_PATH: &str = "samples/m-rules.sor";
+// Use JSON for M-Rules as it properly contains CoAP options (URI_PATH, CONTENT_FORMAT)
+// SOR encoding for CoAP options is not yet fully implemented
+const M_RULES_PATH: &str = "samples/m-rules.json";
 const BASE_RULES_PATH: &str = "rules/base-ipv6-udp.sor";
 const SID_FILE_PATH: &str = "samples/ietf-schc@2026-01-12.sid";
 
@@ -57,9 +59,10 @@ fn main() -> std::io::Result<()> {
     println!("Loading SID file: {}", SID_FILE_PATH);
     let sid_file = SidFile::from_file(SID_FILE_PATH).expect("Failed to load SID file");
 
-    // Load M-Rules for CORECONF traffic compression (from SOR format)
+    // Load M-Rules for CORECONF traffic compression (from JSON format)
+    // Using JSON because SOR encoding doesn't yet fully support CoAP options
     println!("Loading M-Rules from: {}", M_RULES_PATH);
-    let m_rules = MRuleSet::from_sor(M_RULES_PATH, &sid_file).expect("Failed to load M-Rules");
+    let m_rules = MRuleSet::from_file(M_RULES_PATH).expect("Failed to load M-Rules");
     println!("  Loaded {} M-Rules (IDs {}-{})", m_rules.rules().len(), m_rules.reserved_range().0, m_rules.reserved_range().1);
 
     // Load base application rules from SOR (CORECONF CBOR format)
@@ -125,15 +128,16 @@ fn main() -> std::io::Result<()> {
             match mgmt_compressor.decompress(&mgmt_buf[..len], Direction::Up) {
                 Ok(decompressed) => {
                     // Extract CoAP from decompressed IPv6/UDP packet
-                    // Skip: Ethernet (14) + IPv6 (40) + UDP (8) = 62 bytes
-                    if decompressed.len() < 62 {
+                    // SCHC decompression does NOT include Ethernet header
+                    // Skip: IPv6 (40) + UDP (8) = 48 bytes
+                    if decompressed.len() < 48 {
                         println!("\n[CORECONF] Error: Decompressed packet too small ({} bytes)", decompressed.len());
                         continue;
                     }
-                    let coap_bytes = &decompressed[62..];
-                    
+                    let coap_bytes = &decompressed[48..];
+
                     println!("\n[CORECONF] MGMT decompressed: {} bytes -> {} bytes",
-                        len, decompressed.len() - 14);
+                        len, decompressed.len());
                     
                     if let Ok(packet) = Packet::from_bytes(coap_bytes) {
                         if matches!(packet.header.code, MessageClass::Empty) {
@@ -333,7 +337,11 @@ fn handle_coreconf_request(
 
     let mut response = Packet::new();
     response.header.message_id = packet.header.message_id;
-    response.set_token(packet.get_token().to_vec());
+    // Set response type to ACK for piggybacked response to CON request
+    // M-Rules expect Type=ACK (2) for downlink responses
+    response.header.set_type(MessageType::Acknowledgement);
+    // M-Rules expect TKL=0 (no token)
+    response.set_token(vec![]);
 
     let (class, detail) = coreconf_response.code.to_code_pair();
     response.header.code = match (class, detail) {
@@ -362,7 +370,8 @@ fn create_not_found(request: &Packet) -> Packet {
     let mut response = Packet::new();
     response.header.message_id = request.header.message_id;
     response.header.code = MessageClass::Response(ResponseType::NotFound);
-    response.set_token(request.get_token().to_vec());
+    response.header.set_type(MessageType::Acknowledgement);
+    response.set_token(vec![]); // M-Rules expect TKL=0
     response
 }
 
@@ -370,7 +379,8 @@ fn create_method_not_allowed(request: &Packet) -> Packet {
     let mut response = Packet::new();
     response.header.message_id = request.header.message_id;
     response.header.code = MessageClass::Response(ResponseType::MethodNotAllowed);
-    response.set_token(request.get_token().to_vec());
+    response.header.set_type(MessageType::Acknowledgement);
+    response.set_token(vec![]); // M-Rules expect TKL=0
     response
 }
 
@@ -402,15 +412,24 @@ fn content_format_to_coap(format: rust_coreconf::coap_types::ContentFormat) -> C
 
 /// Build an IPv6/UDP/CoAP packet for management response (Core -> Device)
 fn build_mgmt_response_packet(coap_payload: &[u8]) -> Vec<u8> {
-    // Fixed M-Rule addressing per draft (reversed for response):
+    // Fixed M-Rule addressing per draft-toutain-schc-coreconf-management (downlink):
     // - Core (source): fe80::2
     // - Device (dest): fe80::1
-    // - Port: 5683 (CoAP default)
+    // - App Port (Core): 5683 (CoAP default)
+    // - Dev Port (Device): 3865 (per M-Rules)
+    // - Traffic Class: 1 (DSCP for CORECONF)
+    // - Flow Label: 0x23456 (144470, per M-Rules)
     let src_prefix: [u8; 8] = [0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
     let src_iid: [u8; 8] = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02]; // ::2 (Core)
     let dst_prefix: [u8; 8] = [0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
     let dst_iid: [u8; 8] = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01]; // ::1 (Device)
-    
+
+    // M-Rule constants (for downlink, ports are swapped relative to uplink)
+    const TRAFFIC_CLASS: u32 = 1;      // TC = 1 per M-Rules
+    const FLOW_LABEL: u32 = 0x23456;   // FL = 144470 per M-Rules
+    const APP_PORT: u16 = 5683;        // Source port (Core/CoAP) per M-Rules
+    const DEV_PORT: u16 = 3865;        // Dest port (Device) per M-Rules
+
     let mut packet = Vec::with_capacity(14 + 40 + 8 + coap_payload.len());
 
     // Ethernet header (14 bytes)
@@ -421,7 +440,8 @@ fn build_mgmt_response_packet(coap_payload: &[u8]) -> Vec<u8> {
     ]);
 
     // IPv6 Header (40 bytes)
-    let version_tc_fl = (6u32 << 28) | 0; // Version 6, TC 0, FL 0
+    // Version (4 bits) = 6, Traffic Class (8 bits), Flow Label (20 bits)
+    let version_tc_fl = (6u32 << 28) | (TRAFFIC_CLASS << 20) | (FLOW_LABEL & 0xFFFFF);
     packet.extend_from_slice(&version_tc_fl.to_be_bytes());
 
     // Payload Length (UDP header + CoAP)
@@ -440,9 +460,9 @@ fn build_mgmt_response_packet(coap_payload: &[u8]) -> Vec<u8> {
     packet.extend_from_slice(&dst_prefix);
     packet.extend_from_slice(&dst_iid);
 
-    // UDP Header (8 bytes)
-    packet.extend_from_slice(&5683u16.to_be_bytes()); // src port
-    packet.extend_from_slice(&5683u16.to_be_bytes()); // dst port
+    // UDP Header (8 bytes) - for downlink: src=APP_PORT (Core), dst=DEV_PORT (Device)
+    packet.extend_from_slice(&APP_PORT.to_be_bytes()); // src port (Core)
+    packet.extend_from_slice(&DEV_PORT.to_be_bytes()); // dst port (Device)
     packet.extend_from_slice(&payload_length.to_be_bytes());
     packet.extend_from_slice(&[0x00, 0x00]); // checksum (0 for now)
 

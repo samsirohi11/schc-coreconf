@@ -275,9 +275,9 @@ impl SchcCoreconfHandler {
                                 let output = serde_json::json!({
                                     "status": "success"
                                 });
-                                let cbor = ciborium::into_writer(&output, Vec::new())
-                                    .map(|_| Vec::new())
-                                    .unwrap_or_default();
+                                let mut cbor = Vec::new();
+                                ciborium::into_writer(&output, &mut cbor)
+                                    .expect("CBOR serialization failed");
                                 Response {
                                     code: ResponseCode::Changed,
                                     payload: cbor,

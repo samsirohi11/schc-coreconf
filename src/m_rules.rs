@@ -49,7 +49,14 @@ impl MRuleSet {
 
     /// Create M-Rules from JSON string
     pub fn from_json(json: &str) -> Result<Self> {
-        let rules: Vec<Rule> = serde_json::from_str(json)?;
+        let mut rules: Vec<Rule> = serde_json::from_str(json)?;
+
+        // Parse target values for each field (required for tree building)
+        for rule in &mut rules {
+            for field in &mut rule.compression {
+                field.parse_tv().map_err(|e| Error::Schc(e.to_string()))?;
+            }
+        }
 
         // Determine reserved range from loaded rules
         let min_id = rules.iter().map(|r| r.rule_id).min().unwrap_or(0);

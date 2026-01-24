@@ -197,17 +197,27 @@ pub fn parse_duplicate_rule_rpc(
         .as_map()
         .ok_or("Input is not a map")?;
 
-    // Extract source rule ID
-    let src_id = find_integer(input_map, DELTA_SOURCE_RULE_ID_VALUE)
-        .ok_or("source-rule-id-value not found")? as u32;
-    let src_len = find_integer(input_map, DELTA_SOURCE_RULE_ID_LENGTH)
-        .ok_or("source-rule-id-length not found")? as u8;
+    // Extract source rule ID with validation
+    let src_id_raw = find_integer(input_map, DELTA_SOURCE_RULE_ID_VALUE)
+        .ok_or("source-rule-id-value not found")?;
+    let src_id = u32::try_from(src_id_raw)
+        .map_err(|_| "source-rule-id-value out of range for u32")?;
 
-    // Extract target rule ID
-    let tgt_id = find_integer(input_map, DELTA_TARGET_RULE_ID_VALUE)
-        .ok_or("target-rule-id-value not found")? as u32;
-    let tgt_len = find_integer(input_map, DELTA_TARGET_RULE_ID_LENGTH)
-        .ok_or("target-rule-id-length not found")? as u8;
+    let src_len_raw = find_integer(input_map, DELTA_SOURCE_RULE_ID_LENGTH)
+        .ok_or("source-rule-id-length not found")?;
+    let src_len = u8::try_from(src_len_raw)
+        .map_err(|_| "source-rule-id-length out of range for u8")?;
+
+    // Extract target rule ID with validation
+    let tgt_id_raw = find_integer(input_map, DELTA_TARGET_RULE_ID_VALUE)
+        .ok_or("target-rule-id-value not found")?;
+    let tgt_id = u32::try_from(tgt_id_raw)
+        .map_err(|_| "target-rule-id-value out of range for u32")?;
+
+    let tgt_len_raw = find_integer(input_map, DELTA_TARGET_RULE_ID_LENGTH)
+        .ok_or("target-rule-id-length not found")?;
+    let tgt_len = u8::try_from(tgt_len_raw)
+        .map_err(|_| "target-rule-id-length out of range for u8")?;
 
     // Parse modifications if present
     let mut modifications = Vec::new();
@@ -231,7 +241,8 @@ pub fn parse_duplicate_rule_rpc(
 fn parse_entry_modification(value: &CborValue) -> Option<EntryModification> {
     let map = value.as_map()?;
 
-    let entry_index = find_integer(map, DELTA_ENTRY_INDEX)? as u16;
+    let entry_index_raw = find_integer(map, DELTA_ENTRY_INDEX)?;
+    let entry_index = u16::try_from(entry_index_raw).ok()?;
 
     let mut modification = EntryModification::new(entry_index);
 

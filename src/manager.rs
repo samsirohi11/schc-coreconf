@@ -124,7 +124,8 @@ impl SchcCoreconfManager {
     /// Get the combined RuleSet (M-Rules + active app rules) for compression
     pub fn compression_ruleset(&self) -> Result<RuleSet> {
         let mut all_rules: Vec<Rule> = self.m_rules.rules().to_vec();
-        all_rules.extend(self.active_rules().iter().cloned().cloned());
+        // active_rules() returns Vec<&Rule>, so use into_iter() + cloned()
+        all_rules.extend(self.active_rules().into_iter().cloned());
 
         let json = serde_json::to_string(&all_rules)?;
         RuleSet::from_json(&json).map_err(|e| Error::Schc(e.to_string()))
