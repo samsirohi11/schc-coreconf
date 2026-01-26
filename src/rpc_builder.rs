@@ -380,7 +380,7 @@ impl RpcOverheadAnalysis {
         println!("║  Fixed Overhead:                     {:>3} bytes ({:>4.1}%)        ║",
             self.total_fixed_overhead,
             self.total_fixed_overhead as f64 / self.total_rpc_bytes as f64 * 100.0);
-        println!("║  Per-Field Overhead:                 {:>3} bytes ({:>4.1}%)        ║",
+        println!("║  Total Per-Field Overhead:           {:>3} bytes ({:>4.1}%)        ║",
             self.total_per_field_overhead,
             self.total_per_field_overhead as f64 / self.total_rpc_bytes as f64 * 100.0);
         println!("╚═══════════════════════════════════════════════════════════════╝\n");
@@ -413,8 +413,13 @@ pub fn analyze_rpc_overhead(
     // Calculate modifications array overhead
     let mods_array_overhead = if modifications.is_some() && !modifications.unwrap().is_empty() {
         // delta 5 (1 byte) + array header (1-2 bytes depending on count)
-        let count = modifications.unwrap().len();
-        if count < 24 { 2 } else { 3 }
+        // let count = modifications.unwrap().len();
+        if let Some(mods) = modifications {
+            let count = mods.len();
+            if count < 24 { 2 } else { 3 }
+        } else {
+            0
+        }
     } else {
         0
     };

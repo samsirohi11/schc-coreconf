@@ -99,9 +99,9 @@
       },
       {
         "FID": "COAP.CODE",
-        "TV": 69,
-        "MO": "equal",
-        "CDA": "not-sent",
+        "TV": [68, 69, 128, 137],
+        "MO": "match-mapping",
+        "CDA": "mapping-sent",
         "DI": "down"
       },
       {
@@ -112,12 +112,13 @@
         "CDA": "lsb",
         "MO_VAL": 9
       },
-      { "FID": "COAP.URI_PATH", "TV": "c", "MO": "equal", "CDA": "not-sent" },
+      { "FID": "COAP.URI_PATH", "TV": "c", "MO": "equal", "CDA": "not-sent", "DI": "up" },
       {
         "FID": "COAP.CONTENT_FORMAT",
         "TV": 313,
         "MO": "equal",
-        "CDA": "not-sent"
+        "CDA": "not-sent",
+        "DI": "up"
       }
     ]
   },
@@ -329,9 +330,9 @@
       },
       {
         "FID": "COAP.CODE",
-        "TV": 69,
-        "MO": "equal",
-        "CDA": "not-sent",
+        "TV": [68, 69, 128, 137],
+        "MO": "match-mapping",
+        "CDA": "mapping-sent",
         "DI": "up"
       },
       {
@@ -347,14 +348,16 @@
         "FL": 8,
         "TV": "c",
         "MO": "equal",
-        "CDA": "not-sent"
+        "CDA": "not-sent",
+        "DI": "down"
       },
       {
         "FID": "COAP.CONTENT_FORMAT",
         "FL": 16,
         "TV": 313,
         "MO": "equal",
-        "CDA": "not-sent"
+        "CDA": "not-sent",
+        "DI": "down"
       }
     ]
   },
