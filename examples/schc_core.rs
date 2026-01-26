@@ -28,9 +28,8 @@ use schc_coreconf::{
     mgmt_compression::MgmtCompressor,
 };
 
-// Use JSON for M-Rules as it properly contains CoAP options (URI_PATH, CONTENT_FORMAT)
-// SOR encoding for CoAP options is not yet fully implemented
-const M_RULES_PATH: &str = "samples/m-rules.json";
+// M-Rules in SOR (CORECONF CBOR) format
+const M_RULES_PATH: &str = "samples/m-rules.sor";
 const BASE_RULES_PATH: &str = "rules/base-ipv6-udp.sor";
 const SID_FILE_PATH: &str = "samples/ietf-schc@2026-01-12.sid";
 
@@ -59,10 +58,9 @@ fn main() -> std::io::Result<()> {
     println!("Loading SID file: {}", SID_FILE_PATH);
     let sid_file = SidFile::from_file(SID_FILE_PATH).expect("Failed to load SID file");
 
-    // Load M-Rules for CORECONF traffic compression (from JSON format)
-    // Using JSON because SOR encoding doesn't yet fully support CoAP options
+    // Load M-Rules for CORECONF traffic compression (from SOR format)
     println!("Loading M-Rules from: {}", M_RULES_PATH);
-    let m_rules = MRuleSet::from_file(M_RULES_PATH).expect("Failed to load M-Rules");
+    let m_rules = MRuleSet::from_sor(M_RULES_PATH, &sid_file).expect("Failed to load M-Rules");
     println!("  Loaded {} M-Rules (IDs {}-{})", m_rules.rules().len(), m_rules.reserved_range().0, m_rules.reserved_range().1);
 
     // Load base application rules from SOR (CORECONF CBOR format)

@@ -288,6 +288,240 @@ fn find_integer(map: &[(CborValue, CborValue)], key: i64) -> Option<i64> {
 }
 
 // =============================================================================
+// Overhead Analysis
+// =============================================================================
+
+/// Overhead breakdown for CORECONF duplicate-rule RPC
+#[derive(Debug, Clone)]
+pub struct RpcOverheadAnalysis {
+    /// Total RPC payload size (CBOR bytes)
+    pub total_rpc_bytes: usize,
+    /// Fixed overhead: CBOR root map + RPC SID
+    pub cbor_root_overhead: usize,
+    /// Fixed overhead: source/target rule ID fields
+    pub rule_id_overhead: usize,
+    /// Fixed overhead: modifications array wrapper (if present)
+    pub mods_array_overhead: usize,
+    /// Per-modification overhead details
+    pub modification_overheads: Vec<ModificationOverhead>,
+    /// Total fixed overhead (cbor_root + rule_id + mods_array)
+    pub total_fixed_overhead: usize,
+    /// Total per-field overhead (sum of all modifications)
+    pub total_per_field_overhead: usize,
+    /// Average per-field overhead
+    pub avg_per_field_overhead: f64,
+}
+
+/// Overhead breakdown for a single entry modification
+#[derive(Debug, Clone)]
+pub struct ModificationOverhead {
+    /// Entry index being modified
+    pub entry_index: u16,
+    /// Overhead for entry-index field (delta + value)
+    pub entry_index_bytes: usize,
+    /// Overhead for target-value field (delta + CBOR header + data)
+    pub target_value_bytes: Option<usize>,
+    /// Size of actual target value data (without CBOR overhead)
+    pub target_value_data_bytes: Option<usize>,
+    /// Overhead for matching-operator field (delta + SID)
+    pub mo_bytes: Option<usize>,
+    /// Overhead for comp-decomp-action field (delta + SID)
+    pub cda_bytes: Option<usize>,
+    /// Total bytes for this modification
+    pub total_bytes: usize,
+    /// Overhead bytes (total - data)
+    pub overhead_bytes: usize,
+}
+
+impl RpcOverheadAnalysis {
+    /// Print a detailed breakdown of the overhead
+    pub fn print_breakdown(&self) {
+        println!("\n╔═══════════════════════════════════════════════════════════════╗");
+        println!("║          CORECONF RPC OVERHEAD ANALYSIS                       ║");
+        println!("╠═══════════════════════════════════════════════════════════════╣");
+        println!("║ FIXED OVERHEAD (CoAP/CBOR RPC wrapper)                        ║");
+        println!("╠───────────────────────────────────────────────────────────────╣");
+        println!("║  CBOR root map + RPC SID (5201):     {:>3} bytes                ║", self.cbor_root_overhead);
+        println!("║  Source/Target Rule IDs (4 fields):  {:>3} bytes                ║", self.rule_id_overhead);
+        println!("║  Modifications array wrapper:        {:>3} bytes                ║", self.mods_array_overhead);
+        println!("║                                     ─────────                 ║");
+        println!("║  Total Fixed Overhead:               {:>3} bytes                ║", self.total_fixed_overhead);
+        println!("╠═══════════════════════════════════════════════════════════════╣");
+        println!("║ PER-FIELD OVERHEAD (Entry Modifications)                      ║");
+        println!("╠───────────────────────────────────────────────────────────────╣");
+
+        for (i, m) in self.modification_overheads.iter().enumerate() {
+            println!("║  Entry[{}] (index={}):                                          ║", i, m.entry_index);
+            println!("║    - entry-index (delta+val):        {:>3} bytes                ║", m.entry_index_bytes);
+            if let Some(tv) = m.target_value_bytes {
+                let data = m.target_value_data_bytes.unwrap_or(0);
+                println!("║    - target-value (delta+hdr+data):  {:>3} bytes (data: {} B)    ║", tv, data);
+            }
+            if let Some(mo) = m.mo_bytes {
+                println!("║    - matching-operator (delta+SID):  {:>3} bytes                ║", mo);
+            }
+            if let Some(cda) = m.cda_bytes {
+                println!("║    - comp-decomp-action (delta+SID): {:>3} bytes                ║", cda);
+            }
+            println!("║    Subtotal: {} bytes (overhead: {} B, data: {} B)             ║",
+                m.total_bytes,
+                m.overhead_bytes,
+                m.total_bytes - m.overhead_bytes);
+            println!("║                                                               ║");
+        }
+
+        println!("╠───────────────────────────────────────────────────────────────╣");
+        println!("║  Total Per-Field Overhead:           {:>3} bytes                ║", self.total_per_field_overhead);
+        println!("║  Average Per-Field Overhead:        {:>4.1} bytes                ║", self.avg_per_field_overhead);
+        println!("╠═══════════════════════════════════════════════════════════════╣");
+        println!("║ SUMMARY                                                       ║");
+        println!("╠───────────────────────────────────────────────────────────────╣");
+        println!("║  Total RPC Payload:                  {:>3} bytes                ║", self.total_rpc_bytes);
+        println!("║  Fixed Overhead:                     {:>3} bytes ({:>4.1}%)        ║",
+            self.total_fixed_overhead,
+            self.total_fixed_overhead as f64 / self.total_rpc_bytes as f64 * 100.0);
+        println!("║  Per-Field Overhead:                 {:>3} bytes ({:>4.1}%)        ║",
+            self.total_per_field_overhead,
+            self.total_per_field_overhead as f64 / self.total_rpc_bytes as f64 * 100.0);
+        println!("╚═══════════════════════════════════════════════════════════════╝\n");
+    }
+}
+
+/// Analyze the overhead of a duplicate-rule RPC
+pub fn analyze_rpc_overhead(
+    source: (u32, u8),
+    target: (u32, u8),
+    modifications: Option<&[EntryModification]>,
+) -> RpcOverheadAnalysis {
+    // Build the actual RPC to get total size
+    let rpc_bytes = build_duplicate_rule_rpc(source, target, modifications);
+    let total_rpc_bytes = rpc_bytes.len();
+
+    // Calculate CBOR root overhead: { SID_5201: { ... } }
+    // - 1 byte: map with 1 element (0xa1)
+    // - 2 bytes: integer key 5201 (0x19 0x14 0x51)
+    let cbor_root_overhead = 3;
+
+    // Calculate rule ID overhead (4 fields with small integer values)
+    // Each field: 1 byte delta + 1-2 bytes value
+    // source-rule-id-value: delta 1 + value (1-5 bytes depending on size)
+    // source-rule-id-length: delta 2 + value 1 byte
+    // target-rule-id-value: delta 3 + value (1-5 bytes)
+    // target-rule-id-length: delta 4 + value 1 byte
+    let rule_id_overhead = measure_rule_id_fields(source, target);
+
+    // Calculate modifications array overhead
+    let mods_array_overhead = if modifications.is_some() && !modifications.unwrap().is_empty() {
+        // delta 5 (1 byte) + array header (1-2 bytes depending on count)
+        let count = modifications.unwrap().len();
+        if count < 24 { 2 } else { 3 }
+    } else {
+        0
+    };
+
+    // Calculate per-modification overhead
+    let modification_overheads: Vec<ModificationOverhead> = modifications
+        .map(|mods| mods.iter().map(analyze_modification_overhead).collect())
+        .unwrap_or_default();
+
+    let total_per_field_overhead: usize = modification_overheads.iter().map(|m| m.total_bytes).sum();
+    let avg_per_field_overhead = if modification_overheads.is_empty() {
+        0.0
+    } else {
+        total_per_field_overhead as f64 / modification_overheads.len() as f64
+    };
+
+    let total_fixed_overhead = cbor_root_overhead + rule_id_overhead + mods_array_overhead;
+
+    RpcOverheadAnalysis {
+        total_rpc_bytes,
+        cbor_root_overhead,
+        rule_id_overhead,
+        mods_array_overhead,
+        modification_overheads,
+        total_fixed_overhead,
+        total_per_field_overhead,
+        avg_per_field_overhead,
+    }
+}
+
+fn measure_rule_id_fields(source: (u32, u8), target: (u32, u8)) -> usize {
+    let mut size = 0;
+
+    // source-rule-id-value: delta 1 (1 byte) + value
+    size += 1 + cbor_integer_size(source.0 as i64);
+    // source-rule-id-length: delta 2 (1 byte) + value
+    size += 1 + cbor_integer_size(source.1 as i64);
+    // target-rule-id-value: delta 3 (1 byte) + value
+    size += 1 + cbor_integer_size(target.0 as i64);
+    // target-rule-id-length: delta 4 (1 byte) + value
+    size += 1 + cbor_integer_size(target.1 as i64);
+
+    size
+}
+
+fn analyze_modification_overhead(m: &EntryModification) -> ModificationOverhead {
+    // Entry index: delta (1 byte) + value (1-2 bytes)
+    let entry_index_bytes = 1 + cbor_integer_size(m.entry_index as i64);
+
+    // Target value: delta (1 byte) + CBOR bytes header (2-3 bytes) + data
+    let (target_value_bytes, target_value_data_bytes) = if let Some(ref tv) = m.target_value {
+        let data_len = tv.len();
+        let header_len = if data_len < 24 { 1 } else if data_len < 256 { 2 } else { 3 };
+        (Some(1 + header_len + data_len), Some(data_len))
+    } else {
+        (None, None)
+    };
+
+    // Matching operator: delta (1 byte) + SID (2-3 bytes)
+    let mo_bytes = m.matching_operator.map(|sid| 1 + cbor_integer_size(sid));
+
+    // Comp-decomp-action: delta (1 byte) + SID (2-3 bytes)
+    let cda_bytes = m.comp_decomp_action.map(|sid| 1 + cbor_integer_size(sid));
+
+    // Map wrapper overhead: 1 byte for small maps
+    let map_overhead = 1;
+
+    let total_bytes = map_overhead + entry_index_bytes
+        + target_value_bytes.unwrap_or(0)
+        + mo_bytes.unwrap_or(0)
+        + cda_bytes.unwrap_or(0);
+
+    // Overhead = total - actual data
+    let data_bytes = target_value_data_bytes.unwrap_or(0);
+    let overhead_bytes = total_bytes - data_bytes;
+
+    ModificationOverhead {
+        entry_index: m.entry_index,
+        entry_index_bytes,
+        target_value_bytes,
+        target_value_data_bytes,
+        mo_bytes,
+        cda_bytes,
+        total_bytes,
+        overhead_bytes,
+    }
+}
+
+/// Calculate CBOR encoding size for an integer
+fn cbor_integer_size(value: i64) -> usize {
+    if value >= 0 {
+        if value < 24 { 1 }
+        else if value < 256 { 2 }
+        else if value < 65536 { 3 }
+        else if value < 4294967296 { 5 }
+        else { 9 }
+    } else {
+        let abs_val = (-1 - value) as u64;
+        if abs_val < 24 { 1 }
+        else if abs_val < 256 { 2 }
+        else if abs_val < 65536 { 3 }
+        else if abs_val < 4294967296 { 5 }
+        else { 9 }
+    }
+}
+
+// =============================================================================
 // Tests
 // =============================================================================
 

@@ -24,14 +24,13 @@ use schc::{build_tree, compress_packet, Direction, Rule};
 use schc_coreconf::{
     load_sor_rules, MRuleSet, SchcCoreconfManager,
     mgmt_compression::MgmtCompressor,
-    rpc_builder::{build_duplicate_rule_rpc, EntryModification},
+    rpc_builder::{build_duplicate_rule_rpc, analyze_rpc_overhead, EntryModification},
     sor_loader::{mo_to_sid, cda_to_sid},
 };
 use schc::{MatchingOperator, CompressionAction};
 
-// Use JSON for M-Rules as it properly contains CoAP options (URI_PATH, CONTENT_FORMAT)
-// SOR encoding for CoAP options is not yet fully implemented
-const M_RULES_PATH: &str = "samples/m-rules.json";
+// M-Rules in SOR (CORECONF CBOR) format
+const M_RULES_PATH: &str = "samples/m-rules.sor";
 const BASE_RULES_PATH: &str = "rules/base-ipv6-udp.sor";
 const SID_FILE_PATH: &str = "samples/ietf-schc@2026-01-12.sid";
 const PACKETS_BEFORE_DERIVATION: usize = 5;
@@ -52,6 +51,10 @@ fn main() -> std::io::Result<()> {
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
         .unwrap_or("127.0.0.1:5684");
+    let show_overhead = args
+        .iter()
+        .position(|a| a == "--show-overhead")
+        .is_some();
 
     println!("============================================================");
     println!("            SCHC Device (IoT Endpoint)");
@@ -61,10 +64,9 @@ fn main() -> std::io::Result<()> {
     println!("Loading SID file: {}", SID_FILE_PATH);
     let sid_file = SidFile::from_file(SID_FILE_PATH).expect("Failed to load SID file");
 
-    // Load M-Rules for CORECONF traffic compression (from JSON format)
-    // Using JSON because SOR encoding doesn't yet fully support CoAP options
+    // Load M-Rules for CORECONF traffic compression (from SOR format)
     println!("Loading M-Rules from: {}", M_RULES_PATH);
-    let m_rules = MRuleSet::from_file(M_RULES_PATH).expect("Failed to load M-Rules");
+    let m_rules = MRuleSet::from_sor(M_RULES_PATH, &sid_file).expect("Failed to load M-Rules");
     println!("  Loaded {} M-Rules", m_rules.rules().len());
     
     // Create management compressor (must be created before m_rules is moved to manager)
@@ -148,9 +150,9 @@ fn main() -> std::io::Result<()> {
                     i + 1,
                     compressed.rule_id,
                     compressed.rule_id_length,
-                    packet.len() - 14, // Ethernet header
-                    compressed.data.len(),
-                    (1.0 - compressed.data.len() as f64 / (packet.len() - 14) as f64) * 100.0
+                    packet.len() - 14 - payload.len(), // Ethernet header + payload
+                    compressed.data.len() - payload.len(), // SCHC payload
+                    (1.0 - (compressed.data.len() - payload.len()) as f64 / (packet.len() - 14 - payload.len()) as f64) * 100.0
                 );
 
                 // Send compressed packet to Core
@@ -215,6 +217,21 @@ fn main() -> std::io::Result<()> {
         (derived_rule_id, derived_rule_id_length),
         Some(&modifications),
     );
+
+    // Analyze and print CORECONF overhead breakdown
+    if show_overhead {
+        let overhead_analysis = analyze_rpc_overhead(
+            (base_rule_id, base_rule_id_length),
+            (derived_rule_id, derived_rule_id_length),
+            Some(&modifications),
+        );
+        overhead_analysis.print_breakdown();
+    }
+
+    // Print M-Rule compression overhead analysis
+    if show_overhead {
+        print_mrule_compression_overhead(&mgmt_compressor, &rpc_cbor);
+    }
 
     println!("RPC payload size: {} bytes (SID-encoded)", rpc_cbor.len());
 
@@ -312,9 +329,9 @@ fn main() -> std::io::Result<()> {
                     compressed.rule_id,
                     compressed.rule_id_length,
                     improvement,
-                    packet.len() - 14, // Ethernet header
-                    compressed.data.len(),
-                    (1.0 - compressed.data.len() as f64 / (packet.len() - 14) as f64) * 100.0
+                    packet.len() - 14 - payload.len(), // Ethernet header + payload
+                    compressed.data.len() - payload.len(), // SCHC payload
+                    (1.0 - (compressed.data.len() - payload.len()) as f64 / (packet.len() - 14 - payload.len()) as f64) * 100.0
                 );
 
                 // Send compressed packet to Core
@@ -512,4 +529,71 @@ fn send_coap_post(
     Packet::from_bytes(coap_response_bytes).map_err(|e| {
         std::io::Error::other(e.to_string())
     })
+}
+
+/// Print M-Rule compression overhead analysis for CORECONF traffic
+fn print_mrule_compression_overhead(mgmt_compressor: &MgmtCompressor, rpc_payload: &[u8]) {
+    // Build a sample CoAP POST request with the RPC payload
+    let mut coap_packet = coap_lite::Packet::new();
+    coap_packet.header.message_id = 1;
+    coap_packet.header.code = coap_lite::MessageClass::Request(coap_lite::RequestType::Post);
+    coap_packet.header.set_type(coap_lite::MessageType::Confirmable);
+    coap_packet.set_token(vec![]);
+    coap_packet.add_option(coap_lite::CoapOption::UriPath, b"c".to_vec());
+    coap_packet.add_option(coap_lite::CoapOption::ContentFormat, vec![0x01, 0x39]); // 313
+    coap_packet.payload = rpc_payload.to_vec();
+
+    let coap_bytes = coap_packet.to_bytes().unwrap_or_default();
+
+    // Build full IPv6/UDP/CoAP packet
+    let full_packet = build_mgmt_packet(&coap_bytes);
+
+    // Compress with M-Rules
+    let compressed = mgmt_compressor.compress(&full_packet, Direction::Up)
+        .unwrap_or_default();
+
+    // Calculate overhead components
+    let ethernet_header = 14;
+    let ipv6_header = 40;
+    let udp_header = 8;
+    let coap_header = coap_bytes.len() - rpc_payload.len();
+
+    let original_headers = ipv6_header + udp_header + coap_header;
+    let original_total = full_packet.len() - ethernet_header;
+
+    // SCHC Rule ID is embedded in the compressed data
+    // For M-Rules with RuleIDLength=4, it's 4 bits = 0.5 bytes (rounded to 1 byte in practice)
+    let schc_rule_id_bits = 4; // M-Rules use 4-bit rule IDs
+    let schc_residue = compressed.len() - rpc_payload.len();
+
+    println!("\n╔═══════════════════════════════════════════════════════════════╗");
+    println!("║       M-RULE COMPRESSION OVERHEAD ANALYSIS                    ║");
+    println!("╠═══════════════════════════════════════════════════════════════╣");
+    println!("║ ORIGINAL PACKET (before SCHC compression)                     ║");
+    println!("╠───────────────────────────────────────────────────────────────╣");
+    println!("║  IPv6 header:                         {:>3} bytes               ║", ipv6_header);
+    println!("║  UDP header:                          {:>3} bytes               ║", udp_header);
+    println!("║  CoAP header (incl. options):         {:>3} bytes               ║", coap_header);
+    println!("║  CBOR RPC payload:                    {:>3} bytes               ║", rpc_payload.len());
+    println!("║                                      ─────────                 ║");
+    println!("║  Total (excl. Ethernet):              {:>3} bytes               ║", original_total);
+    println!("╠═══════════════════════════════════════════════════════════════╣");
+    println!("║ COMPRESSED PACKET (after M-Rule compression)                  ║");
+    println!("╠───────────────────────────────────────────────────────────────╣");
+    println!("║  SCHC Rule ID:                        {:>3} bits ({:.1} bytes)    ║",
+        schc_rule_id_bits, schc_rule_id_bits as f64 / 8.0);
+    println!("║  SCHC residue (compressed headers):   {:>3} bytes               ║", schc_residue);
+    println!("║  CBOR RPC payload (unchanged):        {:>3} bytes               ║", rpc_payload.len());
+    println!("║                                      ─────────                 ║");
+    println!("║  Total compressed:                    {:>3} bytes               ║", compressed.len());
+    println!("╠═══════════════════════════════════════════════════════════════╣");
+    println!("║ COMPRESSION SUMMARY                                           ║");
+    println!("╠───────────────────────────────────────────────────────────────╣");
+    println!("║  Original headers:                    {:>3} bytes               ║", original_headers);
+    println!("║  Compressed headers (Rule ID+residue):{:>3} bytes               ║", schc_residue);
+    println!("║  Header compression ratio:           {:>4.1}%                    ║",
+        (1.0 - schc_residue as f64 / original_headers as f64) * 100.0);
+    println!("║  Overall compression ratio:          {:>4.1}%                    ║",
+        (1.0 - compressed.len() as f64 / original_total as f64) * 100.0);
+    println!("╚═══════════════════════════════════════════════════════════════╝\n");
 }

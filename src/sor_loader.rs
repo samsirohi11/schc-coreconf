@@ -66,6 +66,20 @@ const SID_CDA_MAPPING_SENT: i64 = 2922;
 const SID_CDA_LSB: i64 = 2923;
 const SID_CDA_COMPUTE: i64 = 2924;
 
+// Identity SID for CoAP Space ID (universal options)
+const SID_SPACE_ID_COAP: i64 = 2930;
+
+// Negative deltas for universal option entries (CoAP options, etc.)
+// These are used instead of positive deltas when encoding CoAP options
+const NEG_DELTA_SPACE_ID: i64 = -4;
+const NEG_DELTA_OPTION_NUM: i64 = -5;
+const NEG_DELTA_FIELD_LENGTH: i64 = -11;
+const NEG_DELTA_DIRECTION: i64 = -12;
+const NEG_DELTA_TARGET_VALUE: i64 = -3;
+const NEG_DELTA_MO: i64 = -9;
+const NEG_DELTA_MO_VALUE: i64 = -8;
+const NEG_DELTA_CDA: i64 = -16;
+
 // =============================================================================
 // Public API
 // =============================================================================
@@ -484,14 +498,84 @@ fn sid_to_field_id(sid: i64, _sid_file: &SidFile) -> Result<FieldId> {
 fn coap_option_to_field_id(option_num: u16) -> FieldId {
     // Map CoAP option numbers to FieldId
     match option_num {
+        1 => FieldId::CoapIfMatch,
         3 => FieldId::CoapUriHost,
+        4 => FieldId::CoapEtag,
+        5 => FieldId::CoapIfNoneMatch,
+        6 => FieldId::CoapObserve,
         7 => FieldId::CoapUriPort,
+        8 => FieldId::CoapLocationPath,
         11 => FieldId::CoapUriPath,
         12 => FieldId::CoapContentFormat,
+        14 => FieldId::CoapMaxAge,
         15 => FieldId::CoapUriQuery,
         17 => FieldId::CoapAccept,
+        20 => FieldId::CoapLocationQuery,
+        23 => FieldId::CoapBlock2,
+        27 => FieldId::CoapBlock1,
+        28 => FieldId::CoapSize2,
+        35 => FieldId::CoapProxyUri,
+        39 => FieldId::CoapProxyScheme,
+        60 => FieldId::CoapSize1,
+        258 => FieldId::CoapNoResponse,
         // Default to generic option for unknown
         _ => FieldId::CoapOption,
+    }
+}
+
+/// Check if a FieldId represents a CoAP option (that requires universal option encoding)
+fn is_coap_option(fid: FieldId) -> bool {
+    matches!(fid,
+        FieldId::CoapIfMatch
+        | FieldId::CoapUriHost
+        | FieldId::CoapEtag
+        | FieldId::CoapIfNoneMatch
+        | FieldId::CoapObserve
+        | FieldId::CoapUriPort
+        | FieldId::CoapLocationPath
+        | FieldId::CoapUriPath
+        | FieldId::CoapContentFormat
+        | FieldId::CoapMaxAge
+        | FieldId::CoapUriQuery
+        | FieldId::CoapAccept
+        | FieldId::CoapLocationQuery
+        | FieldId::CoapBlock2
+        | FieldId::CoapBlock1
+        | FieldId::CoapSize2
+        | FieldId::CoapProxyUri
+        | FieldId::CoapProxyScheme
+        | FieldId::CoapSize1
+        | FieldId::CoapNoResponse
+        | FieldId::CoapOption
+    )
+}
+
+/// Map FieldId to CoAP option number (reverse of coap_option_to_field_id)
+fn field_id_to_coap_option_num(fid: FieldId) -> Option<u16> {
+    match fid {
+        FieldId::CoapIfMatch => Some(1),
+        FieldId::CoapUriHost => Some(3),
+        FieldId::CoapEtag => Some(4),
+        FieldId::CoapIfNoneMatch => Some(5),
+        FieldId::CoapObserve => Some(6),
+        FieldId::CoapUriPort => Some(7),
+        FieldId::CoapLocationPath => Some(8),
+        FieldId::CoapUriPath => Some(11),
+        FieldId::CoapContentFormat => Some(12),
+        FieldId::CoapMaxAge => Some(14),
+        FieldId::CoapUriQuery => Some(15),
+        FieldId::CoapAccept => Some(17),
+        FieldId::CoapLocationQuery => Some(20),
+        FieldId::CoapBlock2 => Some(23),
+        FieldId::CoapBlock1 => Some(27),
+        FieldId::CoapSize2 => Some(28),
+        FieldId::CoapProxyUri => Some(35),
+        FieldId::CoapProxyScheme => Some(39),
+        FieldId::CoapSize1 => Some(60),
+        FieldId::CoapNoResponse => Some(258),
+        // Generic CoAP option doesn't have a fixed number
+        FieldId::CoapOption => None,
+        _ => None,
     }
 }
 
@@ -559,15 +643,31 @@ pub fn field_id_to_sid(fid: FieldId) -> Option<i64> {
         FieldId::CoapToken => Some(2847),
         
         // CoAP options do not have dedicated field-id SIDs in ietf-schc.
-        // They should be encoded using the universal option format with CoAP option numbers.
-        // These fields will return None, causing them to be skipped in SOR encoding.
-        // Use JSON format for rules that contain CoAP options.
-        FieldId::CoapUriPath
-        | FieldId::CoapContentFormat
+        // They are encoded using the universal option format with negative deltas
+        // and CoAP option numbers. See coap_option_to_cbor_value() for encoding.
+        // Return None here so that field_to_cbor_value() will use the universal
+        // option encoding path instead of the normal field encoding.
+        FieldId::CoapIfMatch
         | FieldId::CoapUriHost
+        | FieldId::CoapEtag
+        | FieldId::CoapIfNoneMatch
+        | FieldId::CoapObserve
         | FieldId::CoapUriPort
+        | FieldId::CoapLocationPath
+        | FieldId::CoapUriPath
+        | FieldId::CoapContentFormat
+        | FieldId::CoapMaxAge
         | FieldId::CoapUriQuery
-        | FieldId::CoapAccept => None,
+        | FieldId::CoapAccept
+        | FieldId::CoapLocationQuery
+        | FieldId::CoapBlock2
+        | FieldId::CoapBlock1
+        | FieldId::CoapSize2
+        | FieldId::CoapProxyUri
+        | FieldId::CoapProxyScheme
+        | FieldId::CoapSize1
+        | FieldId::CoapNoResponse
+        | FieldId::CoapOption => None,
 
         _ => None, // Not all fields have SIDs
     }
@@ -591,6 +691,14 @@ pub fn cda_to_sid(cda: &CompressionAction) -> i64 {
         CompressionAction::MappingSent => SID_CDA_MAPPING_SENT,
         CompressionAction::Lsb => SID_CDA_LSB,
         CompressionAction::Compute => SID_CDA_COMPUTE,
+    }
+}
+
+/// Get the SID for a Direction
+pub fn direction_to_sid(di: &schc::Direction) -> i64 {
+    match di {
+        schc::Direction::Up => SID_DI_UP,
+        schc::Direction::Down => SID_DI_DOWN,
     }
 }
 
@@ -651,34 +759,46 @@ fn rule_to_cbor_value(rule: &Rule) -> CborValue {
 }
 
 fn field_to_cbor_value(field: &Field, index: usize) -> CborValue {
+    // Check if this is a CoAP option that needs universal option encoding
+    if is_coap_option(field.fid) {
+        return coap_option_to_cbor_value(field, index);
+    }
+
     let mut entries: Vec<(CborValue, CborValue)> = vec![
-        (CborValue::Integer(DELTA_ENTRY_INDEX.into()), 
+        (CborValue::Integer(DELTA_ENTRY_INDEX.into()),
          CborValue::Integer((index as i64).into())),
     ];
-    
+
     // Field ID (if we have a SID for it)
     if let Some(fid_sid) = field_id_to_sid(field.fid) {
-        entries.push((CborValue::Integer(DELTA_FIELD_ID.into()), 
+        entries.push((CborValue::Integer(DELTA_FIELD_ID.into()),
                       CborValue::Integer(fid_sid.into())));
     }
-    
+
     // Field Length
     if let Some(fl) = field.fl {
-        entries.push((CborValue::Integer(DELTA_FIELD_LENGTH.into()), 
+        entries.push((CborValue::Integer(DELTA_FIELD_LENGTH.into()),
                       CborValue::Integer((fl as i64).into())));
     }
-    
+
+    // Direction Indicator
+    if let Some(ref di) = field.di {
+        let di_sid = direction_to_sid(di);
+        entries.push((CborValue::Integer(DELTA_DIRECTION.into()),
+                      CborValue::Integer(di_sid.into())));
+    }
+
     // Target Value
     if let Some(ref tv) = field.tv {
         if let Some(tv_cbor) = json_tv_to_cbor(tv) {
             entries.push((CborValue::Integer(DELTA_TARGET_VALUE.into()), tv_cbor));
         }
     }
-    
+
     // Matching Operator
-    entries.push((CborValue::Integer(DELTA_MO.into()), 
+    entries.push((CborValue::Integer(DELTA_MO.into()),
                   CborValue::Integer(mo_to_sid(&field.mo).into())));
-    
+
     // MO Value (for MSB)
     if let Some(mo_val) = field.mo_val {
         let mo_value_entry = CborValue::Array(vec![
@@ -689,11 +809,70 @@ fn field_to_cbor_value(field: &Field, index: usize) -> CborValue {
         ]);
         entries.push((CborValue::Integer(DELTA_MO_VALUE.into()), mo_value_entry));
     }
-    
+
     // Compression Action
-    entries.push((CborValue::Integer(DELTA_CDA.into()), 
+    entries.push((CborValue::Integer(DELTA_CDA.into()),
                   CborValue::Integer(cda_to_sid(&field.cda).into())));
-    
+
+    CborValue::Map(entries)
+}
+
+/// Encode a CoAP option field using the universal option format (negative deltas)
+fn coap_option_to_cbor_value(field: &Field, index: usize) -> CborValue {
+    let mut entries: Vec<(CborValue, CborValue)> = vec![
+        (CborValue::Integer(DELTA_ENTRY_INDEX.into()),
+         CborValue::Integer((index as i64).into())),
+    ];
+
+    // Space ID (negative delta -4) - set to CoAP space
+    entries.push((CborValue::Integer(NEG_DELTA_SPACE_ID.into()),
+                  CborValue::Integer(SID_SPACE_ID_COAP.into())));
+
+    // Option Number (negative delta -5)
+    if let Some(opt_num) = field_id_to_coap_option_num(field.fid) {
+        entries.push((CborValue::Integer(NEG_DELTA_OPTION_NUM.into()),
+                      CborValue::Integer((opt_num as i64).into())));
+    }
+
+    // Field Length (negative delta -11)
+    if let Some(fl) = field.fl {
+        entries.push((CborValue::Integer(NEG_DELTA_FIELD_LENGTH.into()),
+                      CborValue::Integer((fl as i64).into())));
+    }
+
+    // Direction Indicator (negative delta -12)
+    if let Some(ref di) = field.di {
+        let di_sid = direction_to_sid(di);
+        entries.push((CborValue::Integer(NEG_DELTA_DIRECTION.into()),
+                      CborValue::Integer(di_sid.into())));
+    }
+
+    // Target Value (negative delta -3)
+    if let Some(ref tv) = field.tv {
+        if let Some(tv_cbor) = json_tv_to_cbor(tv) {
+            entries.push((CborValue::Integer(NEG_DELTA_TARGET_VALUE.into()), tv_cbor));
+        }
+    }
+
+    // Matching Operator (negative delta -9)
+    entries.push((CborValue::Integer(NEG_DELTA_MO.into()),
+                  CborValue::Integer(mo_to_sid(&field.mo).into())));
+
+    // MO Value (negative delta -8)
+    if let Some(mo_val) = field.mo_val {
+        let mo_value_entry = CborValue::Array(vec![
+            CborValue::Map(vec![
+                (CborValue::Integer(1.into()), CborValue::Integer(0.into())), // index
+                (CborValue::Integer(2.into()), CborValue::Integer((mo_val as i64).into())), // value
+            ])
+        ]);
+        entries.push((CborValue::Integer(NEG_DELTA_MO_VALUE.into()), mo_value_entry));
+    }
+
+    // Compression Action (negative delta -16)
+    entries.push((CborValue::Integer(NEG_DELTA_CDA.into()),
+                  CborValue::Integer(cda_to_sid(&field.cda).into())));
+
     CborValue::Map(entries)
 }
 
@@ -806,7 +985,101 @@ mod tests {
         assert_eq!(coap_option_to_field_id(11), FieldId::CoapUriPath);
         assert_eq!(coap_option_to_field_id(12), FieldId::CoapContentFormat);
     }
-    
+
+    #[test]
+    fn test_coap_option_reverse_mapping() {
+        // Test round-trip: option_num -> FieldId -> option_num
+        let test_cases = vec![
+            (1, FieldId::CoapIfMatch),
+            (3, FieldId::CoapUriHost),
+            (4, FieldId::CoapEtag),
+            (7, FieldId::CoapUriPort),
+            (11, FieldId::CoapUriPath),
+            (12, FieldId::CoapContentFormat),
+            (15, FieldId::CoapUriQuery),
+            (17, FieldId::CoapAccept),
+        ];
+
+        for (option_num, expected_fid) in test_cases {
+            let fid = coap_option_to_field_id(option_num);
+            assert_eq!(fid, expected_fid, "option_num {} should map to {:?}", option_num, expected_fid);
+
+            let back = field_id_to_coap_option_num(fid);
+            assert_eq!(back, Some(option_num), "{:?} should map back to option_num {}", fid, option_num);
+        }
+    }
+
+    #[test]
+    fn test_is_coap_option() {
+        // CoAP options should be detected
+        assert!(is_coap_option(FieldId::CoapUriPath));
+        assert!(is_coap_option(FieldId::CoapContentFormat));
+        assert!(is_coap_option(FieldId::CoapUriHost));
+        assert!(is_coap_option(FieldId::CoapOption));
+
+        // Non-option CoAP fields should NOT be detected as options
+        assert!(!is_coap_option(FieldId::CoapVer));
+        assert!(!is_coap_option(FieldId::CoapType));
+        assert!(!is_coap_option(FieldId::CoapCode));
+        assert!(!is_coap_option(FieldId::CoapMid));
+        assert!(!is_coap_option(FieldId::CoapToken));
+
+        // Other protocol fields should not be options
+        assert!(!is_coap_option(FieldId::Ipv6Ver));
+        assert!(!is_coap_option(FieldId::UdpDevPort));
+    }
+
+    #[test]
+    fn test_coap_option_cbor_encoding() {
+        // Create a field with CoAP Uri-Path option
+        let field = Field {
+            fid: FieldId::CoapUriPath,
+            fl: Some(8),
+            di: None,
+            tv: Some(serde_json::Value::String("c".to_string())),
+            mo: MatchingOperator::Equal,
+            mo_val: None,
+            cda: CompressionAction::NotSent,
+            parsed_tv: None,
+        };
+
+        let cbor = field_to_cbor_value(&field, 0);
+        let map = cbor.as_map().expect("Should be a map");
+
+        // Check that we have negative deltas (universal option format)
+        let keys: Vec<i64> = map.iter()
+            .filter_map(|(k, _)| k.as_integer().map(|i| i128::from(i) as i64))
+            .collect();
+
+        // Should have entry index (positive) and negative deltas for universal options
+        assert!(keys.contains(&1), "Should have entry index delta 1");
+        assert!(keys.contains(&-4), "Should have space-id delta -4");
+        assert!(keys.contains(&-5), "Should have option-num delta -5");
+        assert!(keys.contains(&-3), "Should have target-value delta -3");
+        assert!(keys.contains(&-9), "Should have MO delta -9");
+        assert!(keys.contains(&-16), "Should have CDA delta -16");
+
+        // Check space-id is CoAP
+        let space_id = map.iter()
+            .find(|(k, _)| k.as_integer().map(|i| i128::from(i) == -4).unwrap_or(false))
+            .map(|(_, v)| v.as_integer().map(|i| i128::from(i) as i64))
+            .flatten();
+        assert_eq!(space_id, Some(SID_SPACE_ID_COAP), "Space ID should be CoAP");
+
+        // Check option number is Uri-Path (11)
+        let opt_num = map.iter()
+            .find(|(k, _)| k.as_integer().map(|i| i128::from(i) == -5).unwrap_or(false))
+            .map(|(_, v)| v.as_integer().map(|i| i128::from(i) as i64))
+            .flatten();
+        assert_eq!(opt_num, Some(11), "Option number should be 11 (Uri-Path)");
+    }
+
+    #[test]
+    fn test_direction_to_sid() {
+        assert_eq!(direction_to_sid(&schc::Direction::Up), SID_DI_UP);
+        assert_eq!(direction_to_sid(&schc::Direction::Down), SID_DI_DOWN);
+    }
+
     fn create_test_sid_file() -> SidFile {
         SidFile::from_str(r#"{
             "module-name": "ietf-schc",

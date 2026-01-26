@@ -207,7 +207,7 @@
       {
         "FID": "COAP.CODE",
         "FL": 8,
-        "TV": [68, 128, 129, 132, 160],
+        "TV": [68, 128, 129, 132, 137, 160],
         "MO": "match-mapping",
         "CDA": "mapping-sent",
         "DI": "down"
@@ -450,7 +450,7 @@
       {
         "FID": "COAP.CODE",
         "FL": 8,
-        "TV": [68, 128, 129, 132, 160],
+        "TV": [68, 128, 129, 132, 137, 160],
         "MO": "match-mapping",
         "CDA": "mapping-sent",
         "DI": "up"
