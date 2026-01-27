@@ -3,13 +3,22 @@
 //! This example demonstrates the Device/IoT side of a SCHC-CORECONF deployment:
 //! - Loads M-Rules and base application rules from SOR (CORECONF CBOR format)
 //! - Runs interactively, maintaining state across operations
-//! - Derives optimized rules on demand with smart rule ID allocation
+//! - Derives optimized rules on demand with smart rule ID allocation (BFS)
+//! - Supports learning mode using RuleLearner to observe traffic patterns
 //! - Compresses packets using the best available rule
+//!
+//! Learning Mode:
+//!   The `learn` command enables the RuleLearner which observes field values
+//!   across packets. After the specified minimum packets are observed, it
+//!   detects fields with constant values and suggests converting them from
+//!   `value-sent` to `not-sent` compression action, reducing overhead.
 //!
 //! Commands:
 //!   send [N]     - Send N packets (default 5)
-//!   derive       - Derive a new optimized rule for current flow
-//!   rules        - Show current rules
+//!   derive       - Derive a new optimized rule (manual/hardcoded)
+//!   learn [N]    - Enable learning mode (RuleLearner suggests after N packets)
+//!   learn off    - Disable learning mode
+//!   rules        - Show current rules and learning status
 //!   help         - Show commands
 //!   quit         - Exit
 //!
@@ -18,7 +27,6 @@
 //!
 //! Run schc_core first in another terminal, then run this.
 
-use std::collections::HashSet;
 use std::io::{self, BufRead, Write};
 use std::net::UdpSocket;
 use std::time::Duration;
@@ -26,6 +34,7 @@ use std::time::Duration;
 use coap_lite::{MessageClass, MessageType, Packet, RequestType, ResponseType};
 use rust_coreconf::SidFile;
 use schc::{build_tree, compress_packet, Direction, MatchingOperator, CompressionAction, Rule};
+use schc::field_id::FieldId;
 use schc_coreconf::{
     load_sor_rules, MRuleSet, SchcCoreconfManager,
     mgmt_compression::MgmtCompressor,
@@ -56,11 +65,12 @@ struct DeviceState {
     dst_port: u16,
     flow_label: u32,
 
-    // Track locally known rule IDs to avoid unnecessary RPC conflicts
-    known_rule_ids: HashSet<(u32, u8)>,
-
     // Current derived rule (if any)
     derived_rule: Option<(u32, u8)>,
+
+    // Learning mode: uses the manager's RuleLearner to observe packets
+    // and dynamically suggest optimized rules based on observed patterns
+    learning_enabled: bool,
 
     show_overhead: bool,
 }
@@ -74,9 +84,6 @@ impl DeviceState {
         base_rule: (u32, u8),
         show_overhead: bool,
     ) -> Self {
-        let mut known_rule_ids = HashSet::new();
-        known_rule_ids.insert(base_rule); // Base rule is always known
-
         Self {
             manager,
             mgmt_compressor,
@@ -92,54 +99,68 @@ impl DeviceState {
             src_port: 12345,
             dst_port: 5683,
             flow_label: 0x12345,
-            known_rule_ids,
             derived_rule: None,
+            learning_enabled: false,
             show_overhead,
         }
     }
 
-    /// Find the next available rule ID using BFS across the binary tree
-    /// This gives a more balanced allocation: 8/5, 24/5, 8/6, 24/6, 40/6, 56/6, etc.
-    fn find_next_available_rule_id(&self) -> Option<(u32, u8)> {
-        use std::collections::VecDeque;
+    /// Extract field values from an IPv6/UDP packet for learning
+    ///
+    /// Note: Excludes computed fields (lengths, checksums) since they vary per packet
+    /// and should never be learned as constants.
+    fn extract_fields(&self, packet: &[u8]) -> Vec<(FieldId, Vec<u8>)> {
+        // Skip 14-byte Ethernet header
+        if packet.len() < 14 + 40 + 8 {
+            return vec![];
+        }
+        let ipv6 = &packet[14..];
 
-        const MAX_RULE_ID_LENGTH: u8 = 12; // Don't go beyond 12 bits
+        let mut fields = Vec::new();
 
-        let mut queue: VecDeque<(u32, u8)> = VecDeque::new();
-        let mut visited: HashSet<(u32, u8)> = HashSet::new();
+        // IPv6 Version (4 bits) - offset 0, upper nibble
+        fields.push((FieldId::Ipv6Ver, vec![(ipv6[0] >> 4) & 0x0F]));
 
-        // Start with direct children of base rule
-        let [child0, child1] = SchcCoreconfManager::get_derivation_options(self.base_rule);
-        queue.push_back(child0); // append 0 first
-        queue.push_back(child1); // then append 1
+        // Traffic Class (8 bits) - offset 0-1
+        let tc = ((ipv6[0] & 0x0F) << 4) | ((ipv6[1] >> 4) & 0x0F);
+        fields.push((FieldId::Ipv6Tc, vec![tc]));
 
-        // BFS to find first available slot
-        while let Some(candidate) = queue.pop_front() {
-            let (_rule_id, rule_id_length) = candidate;
+        // Flow Label (20 bits) - offset 1-3
+        let fl = ((ipv6[1] as u32 & 0x0F) << 16) | ((ipv6[2] as u32) << 8) | (ipv6[3] as u32);
+        fields.push((FieldId::Ipv6Fl, fl.to_be_bytes()[1..4].to_vec()));
 
-            // Skip if too long
-            if rule_id_length > MAX_RULE_ID_LENGTH {
-                continue;
-            }
+        // SKIP: Payload Length - computed field (varies with payload size)
 
-            // Skip if already visited
-            if visited.contains(&candidate) {
-                continue;
-            }
-            visited.insert(candidate);
+        // Next Header (8 bits) - offset 6
+        fields.push((FieldId::Ipv6Nxt, vec![ipv6[6]]));
 
-            // Check if this rule ID is available (not in our known set)
-            if !self.known_rule_ids.contains(&candidate) {
-                return Some(candidate);
-            }
+        // Hop Limit (8 bits) - offset 7
+        fields.push((FieldId::Ipv6HopLmt, vec![ipv6[7]]));
 
-            // Add children to queue for BFS exploration
-            let [child0, child1] = SchcCoreconfManager::get_derivation_options(candidate);
-            queue.push_back(child0);
-            queue.push_back(child1);
+        // Source Prefix (64 bits) - offset 8-15
+        fields.push((FieldId::Ipv6DevPrefix, ipv6[8..16].to_vec()));
+
+        // Source IID (64 bits) - offset 16-23
+        fields.push((FieldId::Ipv6DevIid, ipv6[16..24].to_vec()));
+
+        // Destination Prefix (64 bits) - offset 24-31
+        fields.push((FieldId::Ipv6AppPrefix, ipv6[24..32].to_vec()));
+
+        // Destination IID (64 bits) - offset 32-39
+        fields.push((FieldId::Ipv6AppIid, ipv6[32..40].to_vec()));
+
+        // UDP fields (if present)
+        if ipv6[6] == 17 && ipv6.len() >= 48 {
+            let udp = &ipv6[40..];
+            // Source Port (16 bits)
+            fields.push((FieldId::UdpDevPort, udp[0..2].to_vec()));
+            // Destination Port (16 bits)
+            fields.push((FieldId::UdpAppPort, udp[2..4].to_vec()));
+            // SKIP: UDP Length - computed field (varies with payload size)
+            // SKIP: UDP Checksum - computed field
         }
 
-        None // No available rule ID found within limits
+        fields
     }
 
     /// Send packets using the best available rule
@@ -157,6 +178,12 @@ impl DeviceState {
                 self.flow_label,
                 payload.as_bytes(),
             );
+
+            // If learning is enabled, observe the packet fields
+            if self.learning_enabled {
+                let fields = self.extract_fields(&packet);
+                self.manager.observe_packet(&fields);
+            }
 
             let ruleset = self.manager.compression_ruleset().expect("Failed to get ruleset");
             let rules: Vec<Rule> = ruleset.rules.to_vec();
@@ -188,18 +215,92 @@ impl DeviceState {
                 }
             }
 
+            // Check if learning mode has a suggestion ready (based on RuleLearner's min_packets)
+            if self.learning_enabled && self.manager.has_suggestion() {
+                println!("\n[Learning] RuleLearner ready to suggest (observed {} packets)",
+                    self.manager.learning_stats().map(|s| {
+                        // Extract packet count from stats
+                        s.lines().next().unwrap_or("").to_string()
+                    }).unwrap_or_default());
+                self.derive_from_learning()?;
+                self.learning_enabled = false;
+                self.manager.reset_learning();
+                println!("[Learning] Disabled (rule derived)");
+                if i + 1 < count {
+                    println!("\n--- Continuing with remaining {} packets ---\n", count - i - 1);
+                }
+            }
+
             std::thread::sleep(Duration::from_millis(100));
         }
 
         Ok(())
     }
 
-    /// Derive a new optimized rule
-    fn derive_rule(&mut self) -> io::Result<()> {
-        println!("\n--- Deriving optimized rule ---\n");
+    /// Derive a new rule based on patterns learned by the RuleLearner
+    fn derive_from_learning(&mut self) -> io::Result<()> {
+        println!("\n--- Deriving rule from learned patterns ---\n");
 
-        // Find next available rule ID using BFS (checks local state first)
-        let candidate = match self.find_next_available_rule_id() {
+        // Print what the learner observed
+        if let Some(stats) = self.manager.learning_stats() {
+            println!("Observed patterns:\n{}\n", stats);
+        }
+
+        // Get the suggested rule from the learner
+        let suggested = match self.manager.suggest_rule() {
+            Some(r) => r,
+            None => {
+                println!("No rule improvements suggested (fields may already be optimized)");
+                return Ok(());
+            }
+        };
+
+        // Allocate a proper rule ID using BFS (instead of learner's offset-based ID)
+        let (derived_rule_id, derived_rule_id_length) = match self.manager.find_next_available_rule_id(self.base_rule) {
+            Some(c) => c,
+            None => {
+                println!("Error: No available rule IDs within limits");
+                return Ok(());
+            }
+        };
+        println!(
+            "Selected rule ID {}/{} (locally available)",
+            derived_rule_id, derived_rule_id_length
+        );
+
+        // Get the base rule to compare against
+        let base_rule = self.manager.active_rules()
+            .into_iter()
+            .find(|r| r.rule_id == self.base_rule.0 && r.rule_id_length == self.base_rule.1)
+            .cloned()
+            .expect("Base rule not found");
+
+        // Build modifications by comparing suggested rule to base rule
+        let modifications = build_learned_modifications(&base_rule, &suggested);
+
+        if modifications.is_empty() {
+            println!("No field modifications learned");
+            return Ok(());
+        }
+
+        println!("Learned {} field modifications:", modifications.len());
+        for m in &modifications {
+            println!("  Entry {}: MO={:?}, CDA={:?}, TV={} bytes",
+                m.entry_index,
+                m.matching_operator.map(|s| format!("SID {}", s)),
+                m.comp_decomp_action.map(|s| format!("SID {}", s)),
+                m.target_value.as_ref().map(|v| v.len()).unwrap_or(0));
+        }
+
+        self.send_derive_rpc(derived_rule_id, derived_rule_id_length, &modifications)
+    }
+
+    /// Derive a new optimized rule (manual/hardcoded mode)
+    fn derive_rule(&mut self) -> io::Result<()> {
+        println!("\n--- Deriving optimized rule (manual) ---\n");
+
+        // Find next available rule ID using manager's BFS allocation
+        let candidate = match self.manager.find_next_available_rule_id(self.base_rule) {
             Some(c) => c,
             None => {
                 println!("Error: No available rule IDs within limits");
@@ -213,7 +314,7 @@ impl DeviceState {
             derived_rule_id, derived_rule_id_length
         );
 
-        // Build modifications for the flow
+        // Build modifications for the flow (hardcoded based on device state)
         let modifications = vec![
             EntryModification::new(2)  // IPV6.FL
                 .with_target_value_bytes(self.flow_label.to_be_bytes()[1..4].to_vec())
@@ -236,6 +337,12 @@ impl DeviceState {
                 .with_mo(mo_to_sid(&MatchingOperator::Equal))
                 .with_cda(cda_to_sid(&CompressionAction::NotSent)),
         ];
+
+        self.send_derive_rpc(derived_rule_id, derived_rule_id_length, &modifications)
+    }
+
+    /// Send the RPC to derive a rule and apply locally
+    fn send_derive_rpc(&mut self, derived_rule_id: u32, derived_rule_id_length: u8, modifications: &[EntryModification]) -> io::Result<()> {
 
         // Build and send RPC
         let rpc_cbor = build_duplicate_rule_rpc(
@@ -275,8 +382,7 @@ impl DeviceState {
                     .duplicate_rule(self.base_rule, (derived_rule_id, derived_rule_id_length), Some(&local_mods))
                     .expect("Failed to duplicate rule locally");
 
-                // Update local state
-                self.known_rule_ids.insert((derived_rule_id, derived_rule_id_length));
+                // Update state (manager already tracks via duplicate_rule/provision_rule)
                 self.derived_rule = Some((derived_rule_id, derived_rule_id_length));
 
                 // Wait for guard period
@@ -289,11 +395,11 @@ impl DeviceState {
             }
             MessageClass::Response(ResponseType::Conflict) => {
                 // This shouldn't happen if our local tracking is correct,
-                // but handle it gracefully by adding to known set
+                // but handle it gracefully by adding to known set via manager
                 let msg = String::from_utf8_lossy(&response.payload);
                 println!("Conflict (unexpected): {}", msg);
                 println!("Adding {}/{} to known rules and retrying...", derived_rule_id, derived_rule_id_length);
-                self.known_rule_ids.insert((derived_rule_id, derived_rule_id_length));
+                self.manager.mark_rule_id_known(derived_rule_id, derived_rule_id_length);
                 // Recursive retry
                 return self.derive_rule();
             }
@@ -317,14 +423,26 @@ impl DeviceState {
             println!("No derived rule active");
         }
 
-        println!("\nKnown rule IDs (local tracking):");
-        let mut known: Vec<_> = self.known_rule_ids.iter().collect();
+        // Learning mode status
+        if self.learning_enabled {
+            if let Some(stats) = self.manager.learning_stats() {
+                println!("Learning mode: ENABLED");
+                println!("{}", stats);
+            } else {
+                println!("Learning mode: ENABLED (learner not initialized)");
+            }
+        } else {
+            println!("Learning mode: disabled");
+        }
+
+        println!("\nKnown rule IDs (manager tracking):");
+        let mut known: Vec<_> = self.manager.known_rule_ids().iter().collect();
         known.sort_by_key(|(id, len)| (*len, *id));
         for (id, len) in known {
             let marker = if (*id, *len) == self.base_rule {
                 " (base)"
             } else if self.derived_rule == Some((*id, *len)) {
-                " (active)"
+                " (derived)"
             } else {
                 ""
             };
@@ -393,7 +511,7 @@ fn main() -> io::Result<()> {
     println!("Core Management: {}", core_mgmt);
     println!("Core Data:       {}", core_data);
     println!("------------------------------------------------------------");
-    println!("\nCommands: send [N], derive, rules, help, quit\n");
+    println!("\nCommands: send [N], derive, learn [N], rules, help, quit\n");
 
     // Create device state
     let mut state = DeviceState::new(
@@ -431,16 +549,51 @@ fn main() -> io::Result<()> {
             "derive" => {
                 state.derive_rule()?;
             }
+            "learn" => {
+                // Enable/disable learning mode using the RuleLearner
+                if let Some(arg) = parts.get(1) {
+                    if arg.to_lowercase() == "off" {
+                        state.learning_enabled = false;
+                        state.manager.reset_learning();
+                        println!("Learning mode disabled.");
+                    } else if let Ok(min_packets) = arg.parse::<usize>() {
+                        // Enable learning with specified min_packets threshold
+                        state.manager.enable_learning(min_packets);
+                        state.learning_enabled = true;
+                        println!("Learning mode enabled. RuleLearner will suggest after {} packets.", min_packets);
+                        println!("Fields with constant values will be converted to not-sent.");
+                    } else {
+                        println!("Invalid argument. Use: learn <N> or learn off");
+                    }
+                } else {
+                    // Toggle with default min_packets (5)
+                    if state.learning_enabled {
+                        state.learning_enabled = false;
+                        state.manager.reset_learning();
+                        println!("Learning mode disabled.");
+                    } else {
+                        state.manager.enable_learning(5);
+                        state.learning_enabled = true;
+                        println!("Learning mode enabled (default: 5 packets min).");
+                        println!("Fields with constant values will be converted to not-sent.");
+                    }
+                }
+            }
             "rules" => {
                 state.show_rules();
             }
             "help" => {
                 println!("\nCommands:");
-                println!("  send [N]  - Send N packets (default 5)");
-                println!("  derive    - Derive a new optimized rule for current flow");
-                println!("  rules     - Show current rules");
-                println!("  help      - Show this help");
-                println!("  quit      - Exit");
+                println!("  send [N]    - Send N packets (default 5)");
+                println!("  derive      - Derive a new optimized rule (manual/hardcoded)");
+                println!("  learn [N]   - Enable learning mode (observe N packets, then suggest)");
+                println!("  learn off   - Disable learning mode and reset observations");
+                println!("  rules       - Show current rules and learning status");
+                println!("  help        - Show this help");
+                println!("  quit        - Exit");
+                println!("\nLearning mode observes packet fields and detects constant patterns.");
+                println!("After N packets, fields that were constant are converted from");
+                println!("value-sent to not-sent, reducing transmission overhead.");
             }
             "quit" | "exit" | "q" => {
                 println!("Goodbye!");
@@ -479,6 +632,141 @@ fn build_local_mods(modifications: &[EntryModification]) -> serde_json::Value {
             serde_json::Value::Object(entry)
         }).collect::<Vec<_>>()
     })
+}
+
+/// Build modifications by comparing learned rule to base rule
+///
+/// The RuleLearner produces a suggested rule with fields modified based on
+/// observed patterns. This function compares the suggested rule to the base
+/// and builds EntryModification structures for fields that changed.
+fn build_learned_modifications(base_rule: &Rule, suggested_rule: &Rule) -> Vec<EntryModification> {
+    let mut modifications = Vec::new();
+
+    for (idx, (base_field, suggested_field)) in base_rule.compression.iter()
+        .zip(suggested_rule.compression.iter())
+        .enumerate()
+    {
+        // Check if this field was modified by the learner
+        // The learner converts value-sent fields with constant values to not-sent
+        if base_field.cda != suggested_field.cda || base_field.mo != suggested_field.mo {
+            let mut entry_mod = EntryModification::new(idx as u16);
+
+            // Set matching operator
+            entry_mod = entry_mod.with_mo(mo_to_sid(&suggested_field.mo));
+
+            // Set compression action
+            entry_mod = entry_mod.with_cda(cda_to_sid(&suggested_field.cda));
+
+            // Extract target value bytes from the suggested field's tv
+            // Use field-aware conversion to get proper byte lengths
+            if let Some(ref tv) = suggested_field.tv {
+                if let Some(bytes) = json_value_to_bytes_for_field(tv, suggested_field.fid) {
+                    entry_mod = entry_mod.with_target_value_bytes(bytes);
+                }
+            }
+
+            modifications.push(entry_mod);
+        }
+    }
+
+    modifications
+}
+
+/// Convert a JSON target value to bytes for RPC transmission, field-aware
+///
+/// Uses the field ID to determine the expected byte length:
+/// - IID fields: 8 bytes
+/// - Prefix fields: 8 bytes
+/// - Port fields: 2 bytes
+/// - Flow label: 3 bytes
+fn json_value_to_bytes_for_field(tv: &serde_json::Value, fid: FieldId) -> Option<Vec<u8>> {
+    // Determine expected byte length based on field type
+    let expected_len = match fid {
+        FieldId::Ipv6DevIid | FieldId::Ipv6AppIid
+        | FieldId::Ipv6SrcIid | FieldId::Ipv6DstIid => Some(8),
+        FieldId::Ipv6DevPrefix | FieldId::Ipv6AppPrefix
+        | FieldId::Ipv6SrcPrefix | FieldId::Ipv6DstPrefix => Some(8),
+        FieldId::UdpDevPort | FieldId::UdpAppPort
+        | FieldId::UdpSrcPort | FieldId::UdpDstPort => Some(2),
+        FieldId::Ipv6Fl => Some(3),
+        _ => None, // Use minimal representation
+    };
+
+    let bytes = json_value_to_bytes(tv)?;
+
+    // Pad to expected length if needed
+    if let Some(len) = expected_len {
+        if bytes.len() < len {
+            let mut padded = vec![0u8; len];
+            padded[len - bytes.len()..].copy_from_slice(&bytes);
+            return Some(padded);
+        }
+    }
+
+    Some(bytes)
+}
+
+/// Convert a JSON target value to bytes for RPC transmission
+///
+/// Handles formats produced by the RuleLearner:
+/// - Numbers: Convert to minimal byte representation
+/// - IPv6 prefix strings: "2001:0db8:0000:0000::/64" -> 8 bytes
+/// - Hex strings: "0x..." -> decoded bytes
+fn json_value_to_bytes(tv: &serde_json::Value) -> Option<Vec<u8>> {
+    match tv {
+        serde_json::Value::Number(n) => {
+            // Convert number to minimal byte representation
+            if let Some(val) = n.as_u64() {
+                if val == 0 {
+                    Some(vec![0])
+                } else {
+                    // Find minimal byte representation
+                    let bytes = val.to_be_bytes();
+                    let first_nonzero = bytes.iter().position(|&b| b != 0).unwrap_or(7);
+                    Some(bytes[first_nonzero..].to_vec())
+                }
+            } else {
+                None
+            }
+        }
+        serde_json::Value::String(s) => {
+            // Handle hex strings like "0x2001..."
+            if let Some(hex_str) = s.strip_prefix("0x") {
+                return hex::decode(hex_str).ok();
+            }
+
+            // Handle IPv6 prefix format like "2001:0db8:0000:0000::/64"
+            if let Some(prefix_str) = s.strip_suffix("::/64") {
+                return parse_ipv6_prefix(prefix_str);
+            }
+
+            // Shouldn't reach here with properly formatted values
+            log::warn!("Unexpected string format in target value: {}", s);
+            None
+        }
+        serde_json::Value::Array(arr) => {
+            // Array of bytes
+            arr.iter()
+                .map(|v| v.as_u64().map(|n| n as u8))
+                .collect::<Option<Vec<u8>>>()
+        }
+        _ => None,
+    }
+}
+
+/// Parse IPv6 prefix like "2001:0db8:0000:0000" to 8 bytes
+fn parse_ipv6_prefix(s: &str) -> Option<Vec<u8>> {
+    let parts: Vec<&str> = s.split(':').collect();
+    if parts.len() != 4 {
+        return None;
+    }
+
+    let mut bytes = Vec::with_capacity(8);
+    for part in parts {
+        let val = u16::from_str_radix(part, 16).ok()?;
+        bytes.extend_from_slice(&val.to_be_bytes());
+    }
+    Some(bytes)
 }
 
 /// Build an IPv6/UDP packet

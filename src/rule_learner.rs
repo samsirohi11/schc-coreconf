@@ -171,7 +171,11 @@ impl RuleLearner {
 
                         field.mo = MatchingOperator::Equal;
                         field.cda = CompressionAction::NotSent;
-                        field.tv = Some(bytes_to_json_value(value));
+                        field.tv = Some(bytes_to_json_value(value, field.fid));
+                        // Parse the target value to populate parsed_tv for matching
+                        if let Err(e) = field.parse_tv() {
+                            log::warn!("Failed to parse learned TV for {:?}: {}", field.fid, e);
+                        }
                         improvements += 1;
                     }
                 }
@@ -233,18 +237,40 @@ impl RuleLearner {
     }
 }
 
-/// Convert bytes to appropriate JSON value
-fn bytes_to_json_value(bytes: &[u8]) -> Value {
+/// Convert bytes to appropriate JSON value based on field type
+///
+/// Uses formats that the SCHC library's parse_tv() can understand:
+/// - Prefixes: Full IPv6 address format "2001:0db8::/64" (parseable by Ipv6Addr)
+/// - IIDs: numeric (fits in u64)
+/// - Ports/small values: numeric
+/// - Other: hex string with 0x prefix
+fn bytes_to_json_value(bytes: &[u8], fid: FieldId) -> Value {
+    // For IPv6 prefix fields, format as full IPv6 address with /64 notation
+    // The parse_single_value function expects a string parseable by Ipv6Addr::parse()
+    if matches!(fid, FieldId::Ipv6DevPrefix | FieldId::Ipv6AppPrefix
+                   | FieldId::Ipv6SrcPrefix | FieldId::Ipv6DstPrefix) 
+        && bytes.len() == 8 {
+            // Format as full IPv6 address with trailing zeros: xxxx:xxxx:xxxx:xxxx::/64
+            // Using :: notation for the zero suffix to make it parse correctly
+            let prefix = format!(
+                "{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}::/64",
+                bytes[0], bytes[1], bytes[2], bytes[3],
+                bytes[4], bytes[5], bytes[6], bytes[7]
+            );
+            return json!(prefix);
+        }
+
+    // For IID fields and small values, use numeric representation (fits in u64)
+    // This works well for both parse_tv() and for RPC byte conversion
     if bytes.len() <= 8 {
-        // Small enough for numeric representation
         let mut padded = [0u8; 8];
         padded[8 - bytes.len()..].copy_from_slice(bytes);
         let num = u64::from_be_bytes(padded);
-        json!(num)
-    } else {
-        // Use hex string for larger values
-        json!(format!("0x{}", hex::encode(bytes)))
+        return json!(num);
     }
+
+    // For larger values, use hex string
+    json!(format!("0x{}", hex::encode(bytes)))
 }
 
 #[cfg(test)]

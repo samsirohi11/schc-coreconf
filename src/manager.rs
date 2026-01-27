@@ -7,6 +7,7 @@
 use schc::field_id::FieldId;
 use schc::rule::{Rule, RuleSet};
 use serde_json::Value;
+use std::collections::{HashSet, VecDeque};
 use std::fs;
 use std::time::Duration;
 
@@ -16,11 +17,15 @@ use crate::guard_period::GuardPeriodManager;
 use crate::m_rules::MRuleSet;
 use crate::rule_learner::RuleLearner;
 
+/// Maximum rule ID length for derived rules (prevents infinite tree traversal)
+const MAX_RULE_ID_LENGTH: u8 = 12;
+
 /// Unified SCHC-CoRECONF Manager
 ///
 /// This manager:
 /// - Maintains M-Rules for compressing CORECONF traffic
 /// - Manages application rules with guard period synchronization
+/// - Tracks known rule IDs for efficient allocation (avoids conflicts)
 /// - Optionally learns traffic patterns to suggest optimized rules
 #[derive(Debug)]
 pub struct SchcCoreconfManager {
@@ -32,6 +37,9 @@ pub struct SchcCoreconfManager {
     guard_period: GuardPeriodManager,
     /// Rule learner (optional, for progressive optimization)
     learner: Option<RuleLearner>,
+    /// Known rule IDs (local tracking to avoid RPC conflicts)
+    /// Includes both locally provisioned and remotely learned (via conflicts)
+    known_rule_ids: HashSet<(u32, u8)>,
 }
 
 impl SchcCoreconfManager {
@@ -44,9 +52,14 @@ impl SchcCoreconfManager {
     pub fn new(m_rules: MRuleSet, initial_rules: Vec<Rule>, estimated_rtt: Duration) -> Self {
         let mut guard_period = GuardPeriodManager::new(estimated_rtt);
 
-        // Mark initial rules as immediately active
+        // Build known rule IDs set from M-Rules and initial rules
+        let mut known_rule_ids = HashSet::new();
+        for rule in m_rules.rules() {
+            known_rule_ids.insert((rule.rule_id, rule.rule_id_length));
+        }
         for rule in &initial_rules {
             guard_period.mark_active(rule.rule_id, rule.rule_id_length);
+            known_rule_ids.insert((rule.rule_id, rule.rule_id_length));
         }
 
         Self {
@@ -54,6 +67,7 @@ impl SchcCoreconfManager {
             app_rules: initial_rules,
             guard_period,
             learner: None,
+            known_rule_ids,
         }
     }
 
@@ -141,6 +155,96 @@ impl SchcCoreconfManager {
         self.guard_period.set_estimated_rtt(rtt);
     }
 
+    // ========================================================================
+    // Rule ID Tracking and Allocation
+    // ========================================================================
+
+    /// Check if a rule ID is known (either locally provisioned or learned from conflicts)
+    pub fn is_rule_id_known(&self, rule_id: u32, rule_id_length: u8) -> bool {
+        self.known_rule_ids.contains(&(rule_id, rule_id_length))
+    }
+
+    /// Mark a rule ID as known (used when learning from RPC conflicts)
+    ///
+    /// This allows the manager to avoid trying the same rule ID again.
+    pub fn mark_rule_id_known(&mut self, rule_id: u32, rule_id_length: u8) {
+        self.known_rule_ids.insert((rule_id, rule_id_length));
+        log::debug!("Marked rule {}/{} as known", rule_id, rule_id_length);
+    }
+
+    /// Get all known rule IDs
+    pub fn known_rule_ids(&self) -> &HashSet<(u32, u8)> {
+        &self.known_rule_ids
+    }
+
+    /// Find the next available rule ID using BFS from a base rule
+    ///
+    /// This traverses the binary derivation tree breadth-first, giving a more
+    /// balanced allocation: 8/5, 24/5, 8/6, 24/6, 40/6, 56/6, etc.
+    ///
+    /// # Arguments
+    /// * `base_rule` - The base rule to derive from (rule_id, rule_id_length)
+    ///
+    /// # Returns
+    /// * `Some((rule_id, rule_id_length))` - Next available rule ID
+    /// * `None` - No available rule IDs within MAX_RULE_ID_LENGTH limit
+    pub fn find_next_available_rule_id(&self, base_rule: (u32, u8)) -> Option<(u32, u8)> {
+        let mut queue: VecDeque<(u32, u8)> = VecDeque::new();
+        let mut visited: HashSet<(u32, u8)> = HashSet::new();
+
+        // Start with direct children of base rule
+        let [child0, child1] = Self::get_derivation_options(base_rule);
+        queue.push_back(child0); // append 0 first (smaller rule IDs)
+        queue.push_back(child1); // then append 1
+
+        // BFS to find first available slot
+        while let Some(candidate) = queue.pop_front() {
+            let (_rule_id, rule_id_length) = candidate;
+
+            // Skip if too long
+            if rule_id_length > MAX_RULE_ID_LENGTH {
+                continue;
+            }
+
+            // Skip if already visited
+            if visited.contains(&candidate) {
+                continue;
+            }
+            visited.insert(candidate);
+
+            // Check if this rule ID is available
+            if !self.known_rule_ids.contains(&candidate) {
+                return Some(candidate);
+            }
+
+            // Add children to queue for BFS exploration
+            let [child0, child1] = Self::get_derivation_options(candidate);
+            queue.push_back(child0);
+            queue.push_back(child1);
+        }
+
+        None
+    }
+
+    /// Allocate and reserve the next available rule ID
+    ///
+    /// This is a convenience method that finds the next available ID and
+    /// immediately marks it as known to prevent concurrent allocation.
+    ///
+    /// # Returns
+    /// * `Some((rule_id, rule_id_length))` - Allocated rule ID (now marked as known)
+    /// * `None` - No available rule IDs
+    pub fn allocate_rule_id(&mut self, base_rule: (u32, u8)) -> Option<(u32, u8)> {
+        if let Some(rule_id) = self.find_next_available_rule_id(base_rule) {
+            self.known_rule_ids.insert(rule_id);
+            log::info!("Allocated rule ID {}/{}", rule_id.0, rule_id.1);
+            Some(rule_id)
+        } else {
+            log::warn!("No available rule IDs from base {}/{}", base_rule.0, base_rule.1);
+            None
+        }
+    }
+
     /// Provision a new rule or modify an existing one
     ///
     /// - New rules are immediately active (no guard period)
@@ -191,6 +295,7 @@ impl SchcCoreconfManager {
             );
             self.guard_period
                 .mark_active(rule.rule_id, rule.rule_id_length);
+            self.known_rule_ids.insert((rule.rule_id, rule.rule_id_length));
             self.app_rules.push(rule);
         }
 
@@ -554,7 +659,34 @@ impl SchcCoreconfManager {
     }
 
     /// Convert bytes to internal target value format based on field type
+    ///
+    /// Creates JSON values that parse_tv() can understand:
+    /// - PREFIX fields: IPv6 address format "2001:0db8::/64"
+    /// - IID fields: numeric u64
+    /// - Small values: numeric
     fn bytes_to_internal_tv(bytes: &[u8], fid: FieldId) -> Value {
+        let fid_str = fid.as_str();
+
+        // For PREFIX fields, use IPv6 address format with /64 suffix
+        // parse_single_value expects a string parseable by Ipv6Addr::parse()
+        if fid_str.ends_with("PREFIX") && bytes.len() == 8 {
+            let prefix = format!(
+                "{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}::/64",
+                bytes[0], bytes[1], bytes[2], bytes[3],
+                bytes[4], bytes[5], bytes[6], bytes[7]
+            );
+            return Value::String(prefix);
+        }
+
+        // For IID fields, use numeric u64 representation
+        if fid_str.ends_with("IID") && bytes.len() == 8 {
+            let mut val: u64 = 0;
+            for b in bytes {
+                val = (val << 8) | (*b as u64);
+            }
+            return Value::Number(val.into());
+        }
+
         // Small numeric fields (ports, flow label, etc.) - convert to number
         if bytes.len() <= 4 {
             let mut val: u64 = 0;
@@ -563,21 +695,8 @@ impl SchcCoreconfManager {
             }
             return Value::Number(val.into());
         }
-        
-        // Larger fields (IIDs, prefixes) - use hex format
-        let fid_str = fid.as_str();
-        if fid_str.ends_with("IID") {
-            // For IID fields, try to represent as u64 for simple matching
-            if bytes.len() == 8 {
-                let mut val: u64 = 0;
-                for b in bytes {
-                    val = (val << 8) | (*b as u64);
-                }
-                return Value::Number(val.into());
-            }
-        }
-        
-        // For PREFIX and other large fields, use hex string
+
+        // For other large fields, use hex string
         Value::String(format!("0x{}", hex::encode(bytes)))
     }
 

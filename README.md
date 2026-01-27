@@ -2,7 +2,7 @@
 
 CoRECONF-based rule management for SCHC (Static Context Header Compression).
 
-This crate bridges SCHC compression with CoRECONF, enabling remote management of SCHC rules via CoAP/CBOR using YANG data models per [draft-toutain-schc-coreconf-management](https://datatracker.ietf.org/doc/draft-toutain-schc-coreconf-management/).
+This crate bridges SCHC compression with CoRECONF, enabling remote management of SCHC rules via CoAP/CBOR using YANG data models per [draft-toutain-schc-coreconf-management](https://datatracker.ietf.org/doc/draft-toutain-schc-coreconf-management/) with some optimizations.
 
 ## Architecture
 
@@ -11,9 +11,11 @@ graph TB
     subgraph Device["IoT Device"]
         SchcDevice[schc_device]
         DevMgr[SchcCoreconfManager]
+        Learner[RuleLearner]
         DevRules[(Rules)]
 
         SchcDevice --> DevMgr
+        DevMgr --> Learner
         DevMgr --> DevRules
     end
 
@@ -44,6 +46,74 @@ graph TB
     CoreMgr --> SOR
 ```
 
+## Working Model
+
+### Rule Hierarchy
+
+The system uses a layered rule approach:
+
+1. **M-Rules (Management Rules)**: Pre-provisioned, immutable rules for compressing CoRECONF management traffic itself. These ensure efficient RPC transmission even before application rules are optimized.
+
+2. **Base Rules**: Generic application rules with flexible matching (e.g., `ignore` + `value-sent` for variable fields). Serve as templates for derivation.
+
+3. **Derived Rules**: Flow-specific rules created from base rules with tighter matching. Fields observed to be constant are converted from `value-sent` to `not-sent`, reducing transmission overhead.
+
+### Rule Derivation Flow
+
+```
+┌─────────────────┐     observe packets     ┌─────────────────┐
+│   Base Rule     │ ────────────────────►   │   RuleLearner   │
+│   8/4           │                         │                 │
+│ FL: ignore      │                         │ Detects:        │
+│ IID: value-sent │                         │ - FL constant   │
+│ Port: value-sent│                         │ - IID constant  │
+└─────────────────┘                         │ - Port constant │
+                                            └────────┬────────┘
+                                                     │ suggest
+                                                     ▼
+┌─────────────────┐     duplicate-rule      ┌─────────────────┐
+│  Derived Rule   │ ◄────────────────────   │  Suggested Rule │
+│   8/5           │        RPC              │                 │
+│ FL: equal/      │                         │ Modifications:  │
+│     not-sent    │                         │ - FL → not-sent │
+│ IID: equal/     │                         │ - IID → not-sent│
+│     not-sent    │                         │ - Port→ not-sent│
+└─────────────────┘                         └─────────────────┘
+```
+
+### Learning Mode
+
+The RuleLearner observes packet field values and detects constant patterns:
+
+1. **Observation**: Each packet's field values are recorded (excluding computed fields like length/checksum)
+2. **Pattern Detection**: After N packets, fields with 100% constant values are identified
+3. **Rule Suggestion**: Constant fields are converted from `value-sent` to `not-sent` with the observed value as target
+4. **Provisioning**: The optimized rule is sent to the peer via `duplicate-rule` RPC and applied locally
+
+This enables progressive optimization without prior knowledge of traffic patterns.
+
+### Rule ID Allocation
+
+Derived rules follow a binary tree structure per the draft specification:
+
+```
+Base Rule: 8/4 (binary: 1000)
+    ├── 8/5  (binary: 01000) - append 0
+    └── 24/5 (binary: 11000) - append 1
+        ├── 24/6 (binary: 011000) - append 0
+        └── 56/6 (binary: 111000) - append 1
+```
+
+The manager uses BFS allocation to find available rule IDs, providing balanced tree growth and avoiding conflicts.
+
+### Guard Period
+
+Rule modifications require synchronization between endpoints. The guard period (based on RTT estimate) ensures:
+
+- **New rules**: Immediately active (no guard period)
+- **Modified rules**: Candidate state during guard period, then active
+- **Deleted rules**: Rule ID blocked during guard period to prevent reuse conflicts
+
 ## Key Components
 
 | Module                | Purpose                                                                |
@@ -55,7 +125,7 @@ graph TB
 | `m_rules.rs`          | M-Rule management (protected management rules)                         |
 | `mgmt_compression.rs` | Compress CORECONF traffic using M-Rules                                |
 | `guard_period.rs`     | RTT-based rule synchronization                                         |
-| `rule_learner.rs`     | Progressive pattern learning                                           |
+| `rule_learner.rs`     | Progressive pattern learning for automatic rule optimization           |
 
 ## Features
 
@@ -64,8 +134,8 @@ graph TB
 - **SID-Based RPC**: Compact `duplicate-rule` encoding using SID deltas
 - **Entry-Index Modifications**: Modify rule fields by index (no FID/POS/DI needed)
 - **Guard Period**: RTT-based synchronization for high-latency links
-- **Binary Tree Rule IDs**: Helper functions for proper rule derivation
-- **Progressive Learning**: Observe traffic patterns and suggest optimized rules
+- **Binary Tree Rule IDs**: BFS allocation for proper rule derivation
+- **Learning Mode**: Observe traffic patterns and automatically suggest optimized rules
 
 ## Quick Start
 
@@ -80,6 +150,22 @@ cargo run --example schc_core
 # Run Device (in terminal 2)
 cargo run --example schc_device
 ```
+
+### Device Commands
+
+The interactive device example supports:
+
+| Command     | Description                                              |
+| ----------- | -------------------------------------------------------- |
+| `send [N]`  | Send N packets (default 5) using best available rule     |
+| `derive`    | Manually derive optimized rule (hardcoded modifications) |
+| `learn [N]` | Enable learning mode (auto-derive after N packets)       |
+| `learn off` | Disable learning mode                                    |
+| `rules`     | Show current rules and learning status                   |
+| `help`      | Show available commands                                  |
+| `quit`      | Exit                                                     |
+
+**Learning mode** observes field values across packets and automatically derives a rule when constant patterns are detected.
 
 ## Project Structure
 
@@ -129,6 +215,36 @@ let m_rules = MRuleSet::from_sor("samples/m-rules.sor", &sid_file)?;
 let app_rules = load_sor_rules("rules/base-ipv6-udp.sor", &sid_file)?;
 ```
 
+### Manager with Learning
+
+```rust
+use schc_coreconf::SchcCoreconfManager;
+use std::time::Duration;
+
+let mut manager = SchcCoreconfManager::new(
+    m_rules,
+    app_rules,
+    Duration::from_millis(100),  // RTT estimate
+);
+
+// Enable learning mode (suggest after 5 packets)
+manager.enable_learning(5);
+
+// Observe packets during compression
+for packet in packets {
+    let fields = extract_fields(&packet);
+    manager.observe_packet(&fields);
+}
+
+// Check for suggestions
+if manager.has_suggestion() {
+    if let Some(rule) = manager.suggest_rule() {
+        // Send RPC to peer and provision locally
+        manager.provision_rule(rule)?;
+    }
+}
+```
+
 ### Duplicate-Rule RPC (SID-Encoded)
 
 ```rust
@@ -153,25 +269,19 @@ let rpc = build_duplicate_rule_rpc(
 );
 ```
 
-### Manager Setup
+### Rule ID Allocation
 
 ```rust
-use schc_coreconf::{SchcCoreconfManager, MRuleSet};
-use std::time::Duration;
+// Find next available rule ID using BFS
+let base_rule = (8, 4);
+if let Some((id, len)) = manager.find_next_available_rule_id(base_rule) {
+    println!("Available: {}/{}", id, len);  // e.g., 8/5 or 24/5
+}
 
-let m_rules = MRuleSet::from_sor("samples/m-rules.sor", &sid_file)?;
-let mut manager = SchcCoreconfManager::new(
-    m_rules,
-    app_rules,
-    Duration::from_millis(100),  // RTT estimate
-);
-
-// Duplicate a rule with modifications
-manager.duplicate_rule(
-    (8, 4),
-    (8, 5),
-    Some(&modifications_json),
-)?;
+// Allocate and reserve
+if let Some(rule_id) = manager.allocate_rule_id(base_rule) {
+    // rule_id is now marked as known, won't be suggested again
+}
 ```
 
 ## RPC Encoding Comparison
@@ -182,6 +292,15 @@ manager.duplicate_rule(
 | **SID deltas**   | `{5201:{1:8,2:4,3:8,4:5,...}}`             | ~40 bytes  |
 
 The SID-based encoding provides ~70% size reduction for RPC messages.
+
+## Compression Efficiency
+
+With learned rules, header compression improves significantly:
+
+| Traffic Type      | Base Rule | Derived Rule | Improvement |
+| ----------------- | --------- | ------------ | ----------- |
+| IPv6/UDP headers  | ~60%      | ~90%         | +30%        |
+| CORECONF (M-Rule) | ~85%      | N/A          | Built-in    |
 
 ## References
 
