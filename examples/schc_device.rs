@@ -502,6 +502,14 @@ impl DeviceState {
         }
 
         // Build and display the rule tree
+        //Management rules tree
+        println!("\n{}", "=".repeat(80));
+        let mgmt_rules = self.manager.m_rules().rules();
+        let mgmt_tree = build_tree(&mgmt_rules);
+        println!("\nManagement Rule Tree Structure:");
+        display_tree(&mgmt_tree);
+        
+        //Active rules tree
         let active_rules: Vec<Rule> = self
             .manager
             .active_rules()
@@ -509,8 +517,7 @@ impl DeviceState {
             .map(|r| (*r).clone())
             .collect();
         let tree = build_tree(&active_rules);
-        println!("\nSCHC Rule Tree Structure:");
-        println!("Note: Fields marked with ↑ apply to UP traffic only, ↓ to DOWN traffic only, ↔ to both.\n");
+        println!("\nActive Rule Tree Structure:");
         display_tree(&tree);
     }
 }
