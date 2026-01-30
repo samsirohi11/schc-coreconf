@@ -80,6 +80,16 @@ pub fn yang_fid_to_schc(yang_fid: &str) -> Result<FieldId> {
         "fid-coap-option-size1" => Ok(FieldId::CoapSize1),
         "fid-coap-option-no-response" => Ok(FieldId::CoapNoResponse),
 
+        // ICMPv6 fields
+        "fid-icmpv6-type" => Ok(FieldId::Icmpv6Type),
+        "fid-icmpv6-code" => Ok(FieldId::Icmpv6Code),
+        "fid-icmpv6-checksum" => Ok(FieldId::Icmpv6Checksum),
+        "fid-icmpv6-identifier" => Ok(FieldId::Icmpv6Identifier),
+        "fid-icmpv6-mtu" => Ok(FieldId::Icmpv6Mtu),
+        "fid-icmpv6-pointer" => Ok(FieldId::Icmpv6Pointer),
+        "fid-icmpv6-sequence" => Ok(FieldId::Icmpv6Sequence),
+        "fid-icmpv6-payload" => Ok(FieldId::Icmpv6Payload),
+
         // QUIC fields
         "fid-quic-first-byte" => Ok(FieldId::QuicFirstByte),
         "fid-quic-version" => Ok(FieldId::QuicVersion),
@@ -167,6 +177,16 @@ pub fn schc_fid_to_yang(fid: FieldId) -> &'static str {
         FieldId::CoapProxyScheme => "fid-coap-option-proxy-scheme",
         FieldId::CoapSize1 => "fid-coap-option-size1",
         FieldId::CoapNoResponse => "fid-coap-option-no-response",
+
+        // ICMPv6 fields
+        FieldId::Icmpv6Type => "fid-icmpv6-type",
+        FieldId::Icmpv6Code => "fid-icmpv6-code",
+        FieldId::Icmpv6Checksum => "fid-icmpv6-checksum",
+        FieldId::Icmpv6Identifier => "fid-icmpv6-identifier",
+        FieldId::Icmpv6Mtu => "fid-icmpv6-mtu",
+        FieldId::Icmpv6Pointer => "fid-icmpv6-pointer",
+        FieldId::Icmpv6Sequence => "fid-icmpv6-sequence",
+        FieldId::Icmpv6Payload => "fid-icmpv6-payload",
 
         // QUIC fields
         FieldId::QuicFirstByte => "fid-quic-first-byte",

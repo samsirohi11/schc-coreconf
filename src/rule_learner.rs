@@ -288,6 +288,7 @@ mod tests {
             cda,
             mo_val: None,
             parsed_tv: None,
+            fl_func: None,
         }
     }
 

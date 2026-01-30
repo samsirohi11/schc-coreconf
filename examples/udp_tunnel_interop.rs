@@ -1,0 +1,560 @@
+//! SCHC UDP Tunnel - Interoperability Testing
+//!
+//! A UDP tunnel for testing SCHC interoperability with other implementations
+//! (e.g., OpenSCHC, cSCHC). Both sides use the same rule file and exchange
+//! compressed IPv6/UDP packets over UDP.
+//!
+//! Features:
+//! - Supports both SOR (CBOR) and JSON rule formats
+//! - Sends raw IPv6/UDP packets through the tunnel (no Ethernet header)
+//! - Can operate as sender, receiver, bidirectional, or echo mode
+//! - Statistics tracking for compression/decompression success rates
+//!
+//! Usage:
+//!   # Receiver mode (decompress incoming traffic):
+//!   cargo run --example udp_tunnel_interop -- --listen 127.0.0.1:9000 --rules rules/base-ipv6-udp.sor
+//!
+//!   # Sender mode (compress and send traffic):
+//!   cargo run --example udp_tunnel_interop -- --send 127.0.0.1:9000 --rules rules/base-ipv6-udp.sor
+//!
+//!   # Bidirectional mode (send and receive):
+//!   cargo run --example udp_tunnel_interop -- --listen 127.0.0.1:9000 --send 127.0.0.1:9001 --rules rules.sor
+//!
+//!   # Echo mode (decompress, re-compress, send back):
+//!   cargo run --example udp_tunnel_interop -- --listen 127.0.0.1:9000 --echo --rules rules.sor
+//!
+//! For interop testing:
+//!   1. Have the same rule file on both sides (sor or json)
+//!   2. Run this example in listen or echo mode
+//!   3. Configure the other implementation to send to this example's listen address    
+
+use std::io::{self, Write};
+use std::net::{SocketAddr, UdpSocket};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
+
+use rust_coreconf::SidFile;
+use schc::{
+    build_tree, compress_packet_with_link_layer, decompress_packet,
+    Direction, LinkLayer, Rule, RuleSet, TreeNode,
+};
+use schc_coreconf::load_sor_rules;
+
+const SID_FILE_PATH: &str = "samples/ietf-schc@2026-01-12.sid";
+
+/// Statistics for tracking interop test results
+#[derive(Default)]
+struct Stats {
+    rx_packets: AtomicU64,
+    rx_decompress_ok: AtomicU64,
+    rx_decompress_fail: AtomicU64,
+    tx_packets: AtomicU64,
+    tx_compress_ok: AtomicU64,
+    tx_compress_fail: AtomicU64,
+}
+
+impl Stats {
+    fn print(&self) {
+        println!("\n=== Statistics ===");
+        println!("RX: {} packets, {} decompressed, {} failed",
+                 self.rx_packets.load(Ordering::Relaxed),
+                 self.rx_decompress_ok.load(Ordering::Relaxed),
+                 self.rx_decompress_fail.load(Ordering::Relaxed));
+        println!("TX: {} packets, {} compressed, {} failed",
+                 self.tx_packets.load(Ordering::Relaxed),
+                 self.tx_compress_ok.load(Ordering::Relaxed),
+                 self.tx_compress_fail.load(Ordering::Relaxed));
+    }
+}
+
+fn main() -> io::Result<()> {
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+
+    let args: Vec<String> = std::env::args().collect();
+
+    let listen_addr = args.iter().position(|a| a == "--listen")
+        .and_then(|i| args.get(i + 1))
+        .map(|s| s.as_str());
+
+    let send_addr = args.iter().position(|a| a == "--send")
+        .and_then(|i| args.get(i + 1))
+        .map(|s| s.as_str());
+
+    let rules_path = args.iter().position(|a| a == "--rules")
+        .and_then(|i| args.get(i + 1))
+        .map(|s| s.as_str())
+        .unwrap_or("rules/base-ipv6-udp.sor");
+
+    let verbose = args.iter().any(|a| a == "-v" || a == "--verbose");
+    let echo_mode = args.iter().any(|a| a == "--echo");
+
+    if listen_addr.is_none() && send_addr.is_none() {
+        print_usage();
+        return Ok(());
+    }
+
+    println!("============================================================");
+    println!("       SCHC UDP Tunnel - Interoperability Testing");
+    println!("============================================================\n");
+
+    // Load rules (auto-detect format)
+    let rules = load_rules(rules_path)?;
+    println!("Loaded {} rules from {}", rules.len(), rules_path);
+
+    for rule in &rules {
+        println!("  Rule {}/{}: {} fields", rule.rule_id, rule.rule_id_length, rule.compression.len());
+    }
+
+    let ruleset = Arc::new(RuleSet { rules: rules.clone() });
+    let tree = Arc::new(build_tree(&ruleset.rules));
+    let stats = Arc::new(Stats::default());
+    let running = Arc::new(AtomicBool::new(true));
+
+    // Handle Ctrl+C
+    {
+        let running_clone = running.clone();
+        let stats_clone = stats.clone();
+        ctrlc::set_handler(move || {
+            println!("\nShutting down...");
+            stats_clone.print();
+            running_clone.store(false, Ordering::SeqCst);
+            std::process::exit(0);
+        }).expect("Error setting Ctrl-C handler");
+    }
+
+    println!();
+
+    // Determine mode
+    match (listen_addr, send_addr, echo_mode) {
+        // Echo mode: listen and echo back compressed packets
+        (Some(addr), _, true) => {
+            run_echo_mode(addr, &ruleset, &tree, &stats, verbose)?;
+        }
+        // Bidirectional mode: both listen and send
+        (Some(listen), Some(send), false) => {
+            run_bidirectional(listen, send, &ruleset, &tree, &stats, &running, verbose)?;
+        }
+        // Receive only
+        (Some(addr), None, false) => {
+            run_receiver(addr, &ruleset, &stats, verbose)?;
+        }
+        // Send only
+        (None, Some(addr), false) => {
+            run_sender(addr, &ruleset, &tree, &stats, verbose)?;
+        }
+        _ => {
+            print_usage();
+        }
+    }
+
+    stats.print();
+    Ok(())
+}
+
+fn print_usage() {
+    println!("SCHC UDP Tunnel - Interoperability Testing\n");
+    println!("Usage:");
+    println!("  --listen <addr:port>  Listen for incoming SCHC packets");
+    println!("  --send <addr:port>    Send SCHC packets to address");
+    println!("  --rules <path>        Path to rules file (SOR or JSON)");
+    println!("  --echo                Echo mode: decompress and send back re-compressed");
+    println!("  -v, --verbose         Verbose output\n");
+    println!("Examples:");
+    println!("  # Receiver mode:");
+    println!("  cargo run --example udp_tunnel_interop -- --listen 127.0.0.1:9000 --rules rules.sor");
+    println!();
+    println!("  # Sender mode:");
+    println!("  cargo run --example udp_tunnel_interop -- --send 127.0.0.1:9000 --rules rules.sor");
+    println!();
+    println!("  # Echo mode (for testing round-trip):");
+    println!("  cargo run --example udp_tunnel_interop -- --listen 127.0.0.1:9000 --echo --rules rules.sor");
+    println!();
+    println!("  # Bidirectional mode:");
+    println!("  cargo run --example udp_tunnel_interop -- --listen 127.0.0.1:9000 --send 127.0.0.1:9001 --rules rules.sor");
+}
+
+fn load_rules(path: &str) -> io::Result<Vec<Rule>> {
+    if path.ends_with(".sor") || path.ends_with(".cbor") {
+        println!("Loading SOR rules with SID file: {}", SID_FILE_PATH);
+        let sid_file = SidFile::from_file(SID_FILE_PATH)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("SID file error: {}", e)))?;
+        load_sor_rules(path, &sid_file)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("SOR parse error: {}", e)))
+    } else {
+        println!("Loading JSON rules");
+        let content = std::fs::read_to_string(path)?;
+        serde_json::from_str(&content)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("JSON parse error: {}", e)))
+    }
+}
+
+fn run_receiver(addr: &str, ruleset: &RuleSet, stats: &Stats, verbose: bool) -> io::Result<()> {
+    let socket = UdpSocket::bind(addr)?;
+    socket.set_read_timeout(Some(Duration::from_secs(30)))?;
+
+    println!("Listening on {} for SCHC packets...", addr);
+    println!("Press Ctrl+C to stop\n");
+
+    let mut buf = [0u8; 2048];
+
+    loop {
+        match socket.recv_from(&mut buf) {
+            Ok((len, src)) => {
+                stats.rx_packets.fetch_add(1, Ordering::Relaxed);
+                let count = stats.rx_packets.load(Ordering::Relaxed);
+                let schc_data = &buf[..len];
+
+                println!("[{}] Received {} bytes from {}", count, len, src);
+                if verbose {
+                    println!("  SCHC: {}", hex::encode(schc_data));
+                }
+
+                match decompress_packet(schc_data, &ruleset.rules, Direction::Up, None) {
+                    Ok(decompressed) => {
+                        stats.rx_decompress_ok.fetch_add(1, Ordering::Relaxed);
+                        println!("  Decompressed: {} bytes (Rule {}/{})",
+                                 decompressed.full_data.len(),
+                                 decompressed.rule_id,
+                                 decompressed.rule_id_length);
+                        display_ipv6_udp(&decompressed.full_data);
+                    }
+                    Err(e) => {
+                        stats.rx_decompress_fail.fetch_add(1, Ordering::Relaxed);
+                        println!("  Decompress error: {:?}", e);
+                    }
+                }
+                println!();
+            }
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                print!(".");
+                io::stdout().flush()?;
+            }
+            Err(e) => {
+                eprintln!("Receive error: {}", e);
+            }
+        }
+    }
+}
+
+fn run_sender(addr: &str, ruleset: &RuleSet, tree: &TreeNode, stats: &Stats, verbose: bool) -> io::Result<()> {
+    let socket = UdpSocket::bind("0.0.0.0:0")?;
+    socket.connect(addr)?;
+
+    println!("Sending SCHC packets to {}", addr);
+    println!("Commands: 'send [N]' to send N test packets, 'stats', 'quit'\n");
+
+    let stdin = io::stdin();
+
+    loop {
+        print!("sender> ");
+        io::stdout().flush()?;
+
+        let mut line = String::new();
+        if stdin.read_line(&mut line)? == 0 {
+            break;
+        }
+
+        let parts: Vec<&str> = line.trim().split_whitespace().collect();
+        if parts.is_empty() {
+            continue;
+        }
+
+        match parts[0] {
+            "send" => {
+                let count: usize = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(1);
+                send_test_packets(&socket, ruleset, tree, stats, count, verbose)?;
+            }
+            "stats" => stats.print(),
+            "quit" | "exit" | "q" => {
+                println!("Goodbye!");
+                break;
+            }
+            _ => println!("Unknown command. Use 'send [N]', 'stats', or 'quit'"),
+        }
+    }
+
+    Ok(())
+}
+
+fn run_echo_mode(addr: &str, ruleset: &RuleSet, tree: &TreeNode, stats: &Stats, verbose: bool) -> io::Result<()> {
+    let socket = UdpSocket::bind(addr)?;
+    socket.set_read_timeout(Some(Duration::from_secs(30)))?;
+
+    println!("Echo mode: listening on {}", addr);
+    println!("Will decompress, re-compress, and send back to sender.");
+    println!("Press Ctrl+C to stop\n");
+
+    let mut buf = [0u8; 2048];
+
+    loop {
+        match socket.recv_from(&mut buf) {
+            Ok((len, src)) => {
+                stats.rx_packets.fetch_add(1, Ordering::Relaxed);
+                let count = stats.rx_packets.load(Ordering::Relaxed);
+                let schc_data = &buf[..len];
+
+                println!("[{}] Received {} bytes from {}", count, len, src);
+
+                // Decompress
+                match decompress_packet(schc_data, &ruleset.rules, Direction::Up, None) {
+                    Ok(decompressed) => {
+                        stats.rx_decompress_ok.fetch_add(1, Ordering::Relaxed);
+                        println!("  Decompressed: {} bytes (rule {}/{})", 
+                            decompressed.full_data.len(),
+                            decompressed.rule_id,
+                            decompressed.rule_id_length);
+
+                        display_ipv6_udp(&decompressed.full_data);
+
+                        // Re-compress with same direction (for interop testing we don't swap addresses)
+                        match compress_packet_with_link_layer(
+                            tree,
+                            &decompressed.full_data,
+                            Direction::Up,  // Use same direction since addresses aren't swapped
+                            &ruleset.rules,
+                            verbose,
+                            LinkLayer::None,
+                        ) {
+                            Ok(compressed) => {
+                                stats.tx_compress_ok.fetch_add(1, Ordering::Relaxed);
+                                stats.tx_packets.fetch_add(1, Ordering::Relaxed);
+
+                                socket.send_to(&compressed.data, src)?;
+                                println!("  Echo sent: {} bytes to {} (rule {}/{})", 
+                                    compressed.data.len(), src,
+                                    compressed.rule_id,
+                                    compressed.rule_id_length);
+                            }
+                            Err(e) => {
+                                stats.tx_compress_fail.fetch_add(1, Ordering::Relaxed);
+                                println!("  Re-compress error: {:?}", e);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        stats.rx_decompress_fail.fetch_add(1, Ordering::Relaxed);
+                        println!("  Decompress error: {:?}", e);
+                    }
+                }
+                println!();
+            }
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                print!(".");
+                io::stdout().flush()?;
+            }
+            Err(e) => {
+                eprintln!("Receive error: {}", e);
+            }
+        }
+    }
+}
+
+fn run_bidirectional(
+    listen_addr: &str,
+    send_addr: &str,
+    ruleset: &Arc<RuleSet>,
+    tree: &Arc<TreeNode>,
+    stats: &Arc<Stats>,
+    running: &Arc<AtomicBool>,
+    verbose: bool,
+) -> io::Result<()> {
+    let socket = UdpSocket::bind(listen_addr)?;
+    socket.set_read_timeout(Some(Duration::from_millis(100)))?;
+
+    let send_target: SocketAddr = send_addr.parse()
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, format!("Invalid send address: {}", e)))?;
+
+    println!("Bidirectional mode:");
+    println!("  Listening on: {}", listen_addr);
+    println!("  Sending to: {}", send_addr);
+    println!("Commands: 'send [N]', 'stats', 'quit'\n");
+
+    let socket_clone = socket.try_clone()?;
+    let ruleset_clone = ruleset.clone();
+    let stats_clone = stats.clone();
+    let running_clone = running.clone();
+
+    // Receiver thread
+    thread::spawn(move || {
+        let mut buf = [0u8; 2048];
+        while running_clone.load(Ordering::Relaxed) {
+            match socket_clone.recv_from(&mut buf) {
+                Ok((len, src)) => {
+                    stats_clone.rx_packets.fetch_add(1, Ordering::Relaxed);
+                    let count = stats_clone.rx_packets.load(Ordering::Relaxed);
+                    let schc_data = &buf[..len];
+
+                    println!("\n[RX {}] {} bytes from {}", count, len, src);
+                    if let Ok(d) = decompress_packet(schc_data, &ruleset_clone.rules, Direction::Up, None) {
+                        stats_clone.rx_decompress_ok.fetch_add(1, Ordering::Relaxed);
+                        println!("  Decompressed: {} bytes (Rule {}/{})", d.full_data.len(), d.rule_id, d.rule_id_length);
+                    } else {
+                        stats_clone.rx_decompress_fail.fetch_add(1, Ordering::Relaxed);
+                        println!("  Decompress failed");
+                    }
+                    print!("sender> ");
+                    let _ = io::stdout().flush();
+                }
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {}
+                Err(_) => {}
+            }
+        }
+    });
+
+    // Sender loop
+    let stdin = io::stdin();
+    while running.load(Ordering::Relaxed) {
+        print!("sender> ");
+        io::stdout().flush()?;
+
+        let mut line = String::new();
+        if stdin.read_line(&mut line)? == 0 {
+            break;
+        }
+
+        let parts: Vec<&str> = line.trim().split_whitespace().collect();
+        if parts.is_empty() {
+            continue;
+        }
+
+        match parts[0] {
+            "send" => {
+                let count: usize = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(1);
+                for _ in 0..count {
+                    let packet = build_test_ipv6_udp_packet("bidirectional test");
+                    if let Ok(compressed) = compress_packet_with_link_layer(
+                        tree, &packet, Direction::Up, &ruleset.rules, verbose, LinkLayer::None,
+                    ) {
+                        stats.tx_compress_ok.fetch_add(1, Ordering::Relaxed);
+                        stats.tx_packets.fetch_add(1, Ordering::Relaxed);
+                        socket.send_to(&compressed.data, send_target)?;
+                        println!("Sent {} bytes to {}", compressed.data.len(), send_target);
+                    } else {
+                        stats.tx_compress_fail.fetch_add(1, Ordering::Relaxed);
+                        println!("Compression failed");
+                    }
+                }
+            }
+            "stats" => stats.print(),
+            "quit" | "exit" | "q" => {
+                running.store(false, Ordering::SeqCst);
+                break;
+            }
+            _ => println!("Unknown command"),
+        }
+    }
+
+    Ok(())
+}
+
+fn send_test_packets(
+    socket: &UdpSocket,
+    ruleset: &RuleSet,
+    tree: &TreeNode,
+    stats: &Stats,
+    count: usize,
+    verbose: bool,
+) -> io::Result<()> {
+    for i in 0..count {
+        let payload = format!("Test packet #{}", stats.tx_packets.load(Ordering::Relaxed) + 1);
+        let packet = build_test_ipv6_udp_packet(&payload);
+
+        if verbose {
+            println!("[{}] IPv6/UDP: {} bytes", i + 1, packet.len());
+        }
+
+        match compress_packet_with_link_layer(tree, &packet, Direction::Up, &ruleset.rules, verbose, LinkLayer::None) {
+            Ok(compressed) => {
+                stats.tx_compress_ok.fetch_add(1, Ordering::Relaxed);
+                stats.tx_packets.fetch_add(1, Ordering::Relaxed);
+                socket.send(&compressed.data)?;
+                println!("[{}] Sent: {} -> {} bytes (Rule {}/{})",
+                         i + 1, packet.len(), compressed.data.len(),
+                         compressed.rule_id, compressed.rule_id_length);
+            }
+            Err(e) => {
+                stats.tx_compress_fail.fetch_add(1, Ordering::Relaxed);
+                println!("[{}] Compression failed: {:?}", i + 1, e);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn build_test_ipv6_udp_packet(payload: &str) -> Vec<u8> {
+    let mut packet = Vec::with_capacity(40 + 8 + payload.len());
+
+    // IPv6 header (40 bytes)
+    let version_tc_fl: u32 = (6 << 28) | 0x12345;
+    packet.extend_from_slice(&version_tc_fl.to_be_bytes());
+
+    let payload_length = (8 + payload.len()) as u16;
+    packet.extend_from_slice(&payload_length.to_be_bytes());
+    packet.push(17); // UDP
+    packet.push(64); // Hop Limit
+
+    // Source: 2001:db8::1
+    packet.extend_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0x00, 0x00, 0x00, 0x00]);
+    packet.extend_from_slice(&[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01]);
+
+    // Destination: 2001:41d0:0302:2200::5043
+    packet.extend_from_slice(&[0x20, 0x01, 0x41, 0xd0, 0x03, 0x02, 0x22, 0x00]);
+    packet.extend_from_slice(&[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x13, 0xb3]);
+
+    // UDP header
+    packet.extend_from_slice(&12345u16.to_be_bytes()); // Src port
+    packet.extend_from_slice(&5680u16.to_be_bytes());  // Dst port
+    packet.extend_from_slice(&payload_length.to_be_bytes());
+    packet.extend_from_slice(&[0x00, 0x00]); // Checksum
+
+    packet.extend_from_slice(payload.as_bytes());
+    packet
+}
+
+fn display_ipv6_udp(data: &[u8]) {
+    if data.len() < 40 {
+        println!("  [Too short for IPv6]");
+        return;
+    }
+
+    let version = (data[0] >> 4) & 0x0F;
+    let traffic_class = (data[0] >> 0) & 0x0F;
+    let flow_label = u32::from_be_bytes([data[1], data[2], data[3], data[4]]);
+    let payload_len = u16::from_be_bytes([data[4], data[5]]);
+    let next_header = data[6];
+    let hop_limit = data[7];
+    let src_addr: [u8; 16] = data[8..24].try_into().unwrap();
+    let dst_addr: [u8; 16] = data[24..40].try_into().unwrap();
+
+    println!("  IPv6: ver={} tc={} fl={} len={} nxt={} hop={}",
+        version, traffic_class, flow_label, payload_len, next_header, hop_limit);
+    println!("    src: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+        u16::from_be_bytes([src_addr[0], src_addr[1]]),
+        u16::from_be_bytes([src_addr[2], src_addr[3]]),
+        u16::from_be_bytes([src_addr[4], src_addr[5]]),
+        u16::from_be_bytes([src_addr[6], src_addr[7]]),
+        u16::from_be_bytes([src_addr[8], src_addr[9]]),
+        u16::from_be_bytes([src_addr[10], src_addr[11]]),
+        u16::from_be_bytes([src_addr[12], src_addr[13]]),
+        u16::from_be_bytes([src_addr[14], src_addr[15]]));
+    println!("    dst: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+        u16::from_be_bytes([dst_addr[0], dst_addr[1]]),
+        u16::from_be_bytes([dst_addr[2], dst_addr[3]]),
+        u16::from_be_bytes([dst_addr[4], dst_addr[5]]),
+        u16::from_be_bytes([dst_addr[6], dst_addr[7]]),
+        u16::from_be_bytes([dst_addr[8], dst_addr[9]]),
+        u16::from_be_bytes([dst_addr[10], dst_addr[11]]),
+        u16::from_be_bytes([dst_addr[12], dst_addr[13]]),
+        u16::from_be_bytes([dst_addr[14], dst_addr[15]]));
+
+    if next_header == 17 && data.len() >= 48 {
+        let udp = &data[40..];
+        let src_port = u16::from_be_bytes([udp[0], udp[1]]);
+        let dst_port = u16::from_be_bytes([udp[2], udp[3]]);
+        let udp_len = u16::from_be_bytes([udp[4], udp[5]]);
+        let udp_checksum = u16::from_be_bytes([udp[6], udp[7]]);
+        println!("  UDP: {}:{}, len={}, checksum={}", src_port, dst_port, udp_len, udp_checksum);
+    }
+}

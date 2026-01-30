@@ -65,6 +65,27 @@ pub struct SchcCoreconfHandler {
 }
 
 impl SchcCoreconfHandler {
+    /// Acquire a read lock on the manager, recovering from poison if necessary
+    fn read_manager(&self) -> Result<std::sync::RwLockReadGuard<'_, SchcCoreconfManager>> {
+        match self.manager.read() {
+            Ok(guard) => Ok(guard),
+            Err(poisoned) => {
+                log::warn!("Manager lock was poisoned, recovering");
+                Ok(poisoned.into_inner())
+            }
+        }
+    }
+
+    /// Acquire a write lock on the manager, recovering from poison if necessary
+    fn write_manager(&self) -> Result<std::sync::RwLockWriteGuard<'_, SchcCoreconfManager>> {
+        match self.manager.write() {
+            Ok(guard) => Ok(guard),
+            Err(poisoned) => {
+                log::warn!("Manager lock was poisoned, recovering");
+                Ok(poisoned.into_inner())
+            }
+        }
+    }
     /// Create a new SCHC CORECONF handler
     ///
     /// # Arguments
@@ -78,7 +99,16 @@ impl SchcCoreconfHandler {
 
         // Sync rules to datastore
         let manager = Arc::new(RwLock::new(manager));
-        Self::sync_rules_to_datastore(&manager.read().unwrap(), &mut datastore)?;
+        {
+            let manager_guard = match manager.read() {
+                Ok(guard) => guard,
+                Err(poisoned) => {
+                    log::warn!("Manager lock was poisoned during initialization, recovering");
+                    poisoned.into_inner()
+                }
+            };
+            Self::sync_rules_to_datastore(&manager_guard, &mut datastore)?;
+        } // guard is dropped here
 
         Ok(Self {
             manager,
@@ -148,7 +178,10 @@ impl SchcCoreconfHandler {
     /// Handle GET request - retrieve full datastore
     fn handle_get(&self, _request: &Request) -> Response {
         // Sync current rules to datastore first
-        let manager = self.manager.read().unwrap();
+        let manager = match self.read_manager() {
+            Ok(guard) => guard,
+            Err(e) => return Self::error_response(&e),
+        };
         let mut datastore = self.datastore.clone();
 
         if let Err(e) = Self::sync_rules_to_datastore(&manager, &mut datastore) {
@@ -180,7 +213,10 @@ impl SchcCoreconfHandler {
         }
 
         // Delegate to base handler
-        let manager = self.manager.read().unwrap();
+        let manager = match self.read_manager() {
+            Ok(guard) => guard,
+            Err(e) => return Self::error_response(&e),
+        };
         let mut datastore = self.datastore.clone();
 
         if let Err(e) = Self::sync_rules_to_datastore(&manager, &mut datastore) {
@@ -211,7 +247,10 @@ impl SchcCoreconfHandler {
         // Parse the request to check for M-Rule modifications
         match self.parse_and_validate_ipatch(&request.payload) {
             Ok(operations) => {
-                let mut manager = self.manager.write().unwrap();
+                let mut manager = match self.write_manager() {
+                    Ok(guard) => guard,
+                    Err(e) => return Self::error_response(&e),
+                };
 
                 for op in operations {
                     match op {
@@ -267,7 +306,10 @@ impl SchcCoreconfHandler {
                         to,
                         modifications,
                     } => {
-                        let mut manager = self.manager.write().unwrap();
+                        let mut manager = match self.write_manager() {
+                            Ok(guard) => guard,
+                            Err(e) => return Self::error_response(&e),
+                        };
 
                         match manager.duplicate_rule(from, to, modifications.as_ref()) {
                             Ok(()) => {
@@ -276,8 +318,13 @@ impl SchcCoreconfHandler {
                                     "status": "success"
                                 });
                                 let mut cbor = Vec::new();
-                                ciborium::into_writer(&output, &mut cbor)
-                                    .expect("CBOR serialization failed");
+                                if let Err(e) = ciborium::into_writer(&output, &mut cbor) {
+                                    log::error!("CBOR serialization failed: {:?}", e);
+                                    return Self::error_response(&Error::Coreconf(format!(
+                                        "CBOR serialization failed: {}",
+                                        e
+                                    )));
+                                }
                                 Response {
                                     code: ResponseCode::Changed,
                                     payload: cbor,
@@ -329,7 +376,11 @@ impl SchcCoreconfHandler {
     }
 
     /// Parse a single patch operation from SID + value
-    fn parse_patch_operation(&self, target_sid: i64, value: Value) -> Result<Option<PatchOperation>> {
+    fn parse_patch_operation(
+        &self,
+        target_sid: i64,
+        value: Value,
+    ) -> Result<Option<PatchOperation>> {
         // SID 5110 = /ietf-schc:schc/rule (rule list)
         // SID 5135 = rule-id-value
         // SID 5136 = rule-id-length
@@ -339,7 +390,9 @@ impl SchcCoreconfHandler {
             5110 => {
                 if value.is_null() {
                     // Delete all rules (not typically used)
-                    log::warn!("iPATCH with null value for rule list SID - delete all not supported");
+                    log::warn!(
+                        "iPATCH with null value for rule list SID - delete all not supported"
+                    );
                     return Ok(None);
                 }
 
@@ -347,15 +400,10 @@ impl SchcCoreconfHandler {
                 if let Some(arr) = value.as_array() {
                     // Format: [rule-id-value, rule-id-length] means delete that specific rule
                     if arr.len() >= 2 {
-                        let rule_id = arr
-                            .first()
-                            .and_then(|v| v.as_u64())
-                            .ok_or_else(|| Error::Conversion("Invalid rule-id-value in array".into()))?
-                            as u32;
-                        let rule_id_length = arr
-                            .get(1)
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(8) as u8;
+                        let rule_id = arr.first().and_then(|v| v.as_u64()).ok_or_else(|| {
+                            Error::Conversion("Invalid rule-id-value in array".into())
+                        })? as u32;
+                        let rule_id_length = arr.get(1).and_then(|v| v.as_u64()).unwrap_or(8) as u8;
                         return Ok(Some(PatchOperation::Delete(rule_id, rule_id_length)));
                     }
                 }
@@ -373,11 +421,17 @@ impl SchcCoreconfHandler {
             5140..=5162 => {
                 if value.is_null() {
                     // Delete field entry
-                    log::debug!("Field deletion via SID {} not directly supported", target_sid);
+                    log::debug!(
+                        "Field deletion via SID {} not directly supported",
+                        target_sid
+                    );
                     Ok(None)
                 } else {
                     // Field modification - would need context of which rule
-                    log::debug!("Field modification via SID {} - need rule context", target_sid);
+                    log::debug!(
+                        "Field modification via SID {} - need rule context",
+                        target_sid
+                    );
                     Ok(None)
                 }
             }
@@ -385,7 +439,10 @@ impl SchcCoreconfHandler {
             _ => {
                 // Check if this is a null value (delete operation)
                 if value.is_null() {
-                    log::debug!("Null value for SID {} - delete operation ignored without key context", target_sid);
+                    log::debug!(
+                        "Null value for SID {} - delete operation ignored without key context",
+                        target_sid
+                    );
                     return Ok(None);
                 }
 
@@ -426,7 +483,10 @@ impl SchcCoreconfHandler {
             .unwrap_or(8) as u8;
 
         // Check if the rule exists (modify) or is new (create)
-        let manager = self.manager.read().unwrap();
+        let manager = match self.read_manager() {
+            Ok(guard) => guard,
+            Err(e) => return Err(e),
+        };
         let exists = manager
             .all_rules()
             .iter()
@@ -480,7 +540,8 @@ impl SchcCoreconfHandler {
                     None
                 } else {
                     // Build entry array from modifications
-                    let entries: Vec<Value> = request.modifications
+                    let entries: Vec<Value> = request
+                        .modifications
                         .iter()
                         .map(|m| {
                             let mut entry = serde_json::Map::new();
@@ -590,7 +651,13 @@ impl SchcCoreconfHandler {
 
     /// Tick - update guard period states
     pub fn tick(&mut self) {
-        let mut manager = self.manager.write().unwrap();
+        let mut manager = match self.write_manager() {
+            Ok(guard) => guard,
+            Err(e) => {
+                log::error!("Failed to acquire manager lock for tick: {:?}", e);
+                return;
+            }
+        };
         manager.tick();
     }
 }

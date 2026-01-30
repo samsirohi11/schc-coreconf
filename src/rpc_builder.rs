@@ -13,11 +13,11 @@ use ciborium::Value as CborValue;
 pub const SID_DUPLICATE_RULE_INPUT: i64 = 5201;
 
 // Deltas from input container (5201)
-const DELTA_SOURCE_RULE_ID_VALUE: i64 = 1;  // 5202
+const DELTA_SOURCE_RULE_ID_VALUE: i64 = 1; // 5202
 const DELTA_SOURCE_RULE_ID_LENGTH: i64 = 2; // 5203
-const DELTA_TARGET_RULE_ID_VALUE: i64 = 3;  // 5204
+const DELTA_TARGET_RULE_ID_VALUE: i64 = 3; // 5204
 const DELTA_TARGET_RULE_ID_LENGTH: i64 = 4; // 5205
-const DELTA_MODIFICATIONS: i64 = 5;         // 5206
+const DELTA_MODIFICATIONS: i64 = 5; // 5206
 
 // Deltas for entry modifications (from entry container)
 const DELTA_ENTRY_INDEX: i64 = 1;
@@ -172,52 +172,53 @@ pub fn build_duplicate_rule_rpc(
     )]);
 
     let mut output = Vec::new();
-    ciborium::into_writer(&root, &mut output).expect("CBOR serialization should succeed");
+    if let Err(e) = ciborium::into_writer(&root, &mut output) {
+        log::error!(
+            "CBOR serialization failed: {:?}. This should never happen for valid input.",
+            e
+        );
+        // Return empty vec on error - caller should check for empty result
+        return Vec::new();
+    }
     output
 }
 
 /// Parse a SID-encoded duplicate-rule RPC request
 ///
 /// Returns DuplicateRuleRequest if successful.
-pub fn parse_duplicate_rule_rpc(
-    payload: &[u8],
-) -> Result<DuplicateRuleRequest, String> {
+pub fn parse_duplicate_rule_rpc(payload: &[u8]) -> Result<DuplicateRuleRequest, String> {
     let value: CborValue =
         ciborium::from_reader(payload).map_err(|e| format!("CBOR decode error: {}", e))?;
 
-    let root_map = value
-        .as_map()
-        .ok_or("Root is not a map")?;
+    let root_map = value.as_map().ok_or("Root is not a map")?;
 
     // Find input container (SID 5201)
-    let input = find_by_key(root_map, SID_DUPLICATE_RULE_INPUT)
-        .ok_or("Input container not found")?;
+    let input =
+        find_by_key(root_map, SID_DUPLICATE_RULE_INPUT).ok_or("Input container not found")?;
 
-    let input_map = input
-        .as_map()
-        .ok_or("Input is not a map")?;
+    let input_map = input.as_map().ok_or("Input is not a map")?;
 
     // Extract source rule ID with validation
     let src_id_raw = find_integer(input_map, DELTA_SOURCE_RULE_ID_VALUE)
         .ok_or("source-rule-id-value not found")?;
-    let src_id = u32::try_from(src_id_raw)
-        .map_err(|_| "source-rule-id-value out of range for u32")?;
+    let src_id =
+        u32::try_from(src_id_raw).map_err(|_| "source-rule-id-value out of range for u32")?;
 
     let src_len_raw = find_integer(input_map, DELTA_SOURCE_RULE_ID_LENGTH)
         .ok_or("source-rule-id-length not found")?;
-    let src_len = u8::try_from(src_len_raw)
-        .map_err(|_| "source-rule-id-length out of range for u8")?;
+    let src_len =
+        u8::try_from(src_len_raw).map_err(|_| "source-rule-id-length out of range for u8")?;
 
     // Extract target rule ID with validation
     let tgt_id_raw = find_integer(input_map, DELTA_TARGET_RULE_ID_VALUE)
         .ok_or("target-rule-id-value not found")?;
-    let tgt_id = u32::try_from(tgt_id_raw)
-        .map_err(|_| "target-rule-id-value out of range for u32")?;
+    let tgt_id =
+        u32::try_from(tgt_id_raw).map_err(|_| "target-rule-id-value out of range for u32")?;
 
     let tgt_len_raw = find_integer(input_map, DELTA_TARGET_RULE_ID_LENGTH)
         .ok_or("target-rule-id-length not found")?;
-    let tgt_len = u8::try_from(tgt_len_raw)
-        .map_err(|_| "target-rule-id-length out of range for u8")?;
+    let tgt_len =
+        u8::try_from(tgt_len_raw).map_err(|_| "target-rule-id-length out of range for u8")?;
 
     // Parse modifications if present
     let mut modifications = Vec::new();
@@ -341,48 +342,90 @@ impl RpcOverheadAnalysis {
         println!("╠═══════════════════════════════════════════════════════════════╣");
         println!("║ FIXED OVERHEAD (CoAP/CBOR RPC wrapper)                        ║");
         println!("╠───────────────────────────────────────────────────────────────╣");
-        println!("║  CBOR root map + RPC SID (5201):     {:>3} bytes                ║", self.cbor_root_overhead);
-        println!("║  Source/Target Rule IDs (4 fields):  {:>3} bytes                ║", self.rule_id_overhead);
-        println!("║  Modifications array wrapper:        {:>3} bytes                ║", self.mods_array_overhead);
+        println!(
+            "║  CBOR root map + RPC SID (5201):     {:>3} bytes                ║",
+            self.cbor_root_overhead
+        );
+        println!(
+            "║  Source/Target Rule IDs (4 fields):  {:>3} bytes                ║",
+            self.rule_id_overhead
+        );
+        println!(
+            "║  Modifications array wrapper:        {:>3} bytes                ║",
+            self.mods_array_overhead
+        );
         println!("║                                     ─────────                 ║");
-        println!("║  Total Fixed Overhead:               {:>3} bytes                ║", self.total_fixed_overhead);
+        println!(
+            "║  Total Fixed Overhead:               {:>3} bytes                ║",
+            self.total_fixed_overhead
+        );
         println!("╠═══════════════════════════════════════════════════════════════╣");
         println!("║ PER-FIELD OVERHEAD (Entry Modifications)                      ║");
         println!("╠───────────────────────────────────────────────────────────────╣");
 
         for (i, m) in self.modification_overheads.iter().enumerate() {
-            println!("║  Entry[{}] (index={}):                                          ║", i, m.entry_index);
-            println!("║    - entry-index (delta+val):        {:>3} bytes                ║", m.entry_index_bytes);
+            println!(
+                "║  Entry[{}] (index={}):                                          ║",
+                i, m.entry_index
+            );
+            println!(
+                "║    - entry-index (delta+val):        {:>3} bytes                ║",
+                m.entry_index_bytes
+            );
             if let Some(tv) = m.target_value_bytes {
                 let data = m.target_value_data_bytes.unwrap_or(0);
-                println!("║    - target-value (delta+hdr+data):  {:>3} bytes (data: {} B)    ║", tv, data);
+                println!(
+                    "║    - target-value (delta+hdr+data):  {:>3} bytes (data: {} B)    ║",
+                    tv, data
+                );
             }
             if let Some(mo) = m.mo_bytes {
-                println!("║    - matching-operator (delta+SID):  {:>3} bytes                ║", mo);
+                println!(
+                    "║    - matching-operator (delta+SID):  {:>3} bytes                ║",
+                    mo
+                );
             }
             if let Some(cda) = m.cda_bytes {
-                println!("║    - comp-decomp-action (delta+SID): {:>3} bytes                ║", cda);
+                println!(
+                    "║    - comp-decomp-action (delta+SID): {:>3} bytes                ║",
+                    cda
+                );
             }
-            println!("║    Subtotal: {} bytes (overhead: {} B, data: {} B)             ║",
+            println!(
+                "║    Subtotal: {} bytes (overhead: {} B, data: {} B)             ║",
                 m.total_bytes,
                 m.overhead_bytes,
-                m.total_bytes - m.overhead_bytes);
+                m.total_bytes - m.overhead_bytes
+            );
             println!("║                                                               ║");
         }
 
         println!("╠───────────────────────────────────────────────────────────────╣");
-        println!("║  Total Per-Field Overhead:           {:>3} bytes                ║", self.total_per_field_overhead);
-        println!("║  Average Per-Field Overhead:        {:>4.1} bytes                ║", self.avg_per_field_overhead);
+        println!(
+            "║  Total Per-Field Overhead:           {:>3} bytes                ║",
+            self.total_per_field_overhead
+        );
+        println!(
+            "║  Average Per-Field Overhead:        {:>4.1} bytes                ║",
+            self.avg_per_field_overhead
+        );
         println!("╠═══════════════════════════════════════════════════════════════╣");
         println!("║ SUMMARY                                                       ║");
         println!("╠───────────────────────────────────────────────────────────────╣");
-        println!("║  Total RPC Payload:                  {:>3} bytes                ║", self.total_rpc_bytes);
-        println!("║  Fixed Overhead:                     {:>3} bytes ({:>4.1}%)        ║",
+        println!(
+            "║  Total RPC Payload:                  {:>3} bytes                ║",
+            self.total_rpc_bytes
+        );
+        println!(
+            "║  Fixed Overhead:                     {:>3} bytes ({:>4.1}%)        ║",
             self.total_fixed_overhead,
-            self.total_fixed_overhead as f64 / self.total_rpc_bytes as f64 * 100.0);
-        println!("║  Total Per-Field Overhead:           {:>3} bytes ({:>4.1}%)        ║",
+            self.total_fixed_overhead as f64 / self.total_rpc_bytes as f64 * 100.0
+        );
+        println!(
+            "║  Total Per-Field Overhead:           {:>3} bytes ({:>4.1}%)        ║",
             self.total_per_field_overhead,
-            self.total_per_field_overhead as f64 / self.total_rpc_bytes as f64 * 100.0);
+            self.total_per_field_overhead as f64 / self.total_rpc_bytes as f64 * 100.0
+        );
         println!("╚═══════════════════════════════════════════════════════════════╝\n");
     }
 }
@@ -416,7 +459,11 @@ pub fn analyze_rpc_overhead(
         // let count = modifications.unwrap().len();
         if let Some(mods) = modifications {
             let count = mods.len();
-            if count < 24 { 2 } else { 3 }
+            if count < 24 {
+                2
+            } else {
+                3
+            }
         } else {
             0
         }
@@ -429,7 +476,8 @@ pub fn analyze_rpc_overhead(
         .map(|mods| mods.iter().map(analyze_modification_overhead).collect())
         .unwrap_or_default();
 
-    let total_per_field_overhead: usize = modification_overheads.iter().map(|m| m.total_bytes).sum();
+    let total_per_field_overhead: usize =
+        modification_overheads.iter().map(|m| m.total_bytes).sum();
     let avg_per_field_overhead = if modification_overheads.is_empty() {
         0.0
     } else {
@@ -472,7 +520,13 @@ fn analyze_modification_overhead(m: &EntryModification) -> ModificationOverhead 
     // Target value: delta (1 byte) + CBOR bytes header (2-3 bytes) + data
     let (target_value_bytes, target_value_data_bytes) = if let Some(ref tv) = m.target_value {
         let data_len = tv.len();
-        let header_len = if data_len < 24 { 1 } else if data_len < 256 { 2 } else { 3 };
+        let header_len = if data_len < 24 {
+            1
+        } else if data_len < 256 {
+            2
+        } else {
+            3
+        };
         (Some(1 + header_len + data_len), Some(data_len))
     } else {
         (None, None)
@@ -487,7 +541,8 @@ fn analyze_modification_overhead(m: &EntryModification) -> ModificationOverhead 
     // Map wrapper overhead: 1 byte for small maps
     let map_overhead = 1;
 
-    let total_bytes = map_overhead + entry_index_bytes
+    let total_bytes = map_overhead
+        + entry_index_bytes
         + target_value_bytes.unwrap_or(0)
         + mo_bytes.unwrap_or(0)
         + cda_bytes.unwrap_or(0);
@@ -511,18 +566,30 @@ fn analyze_modification_overhead(m: &EntryModification) -> ModificationOverhead 
 /// Calculate CBOR encoding size for an integer
 fn cbor_integer_size(value: i64) -> usize {
     if value >= 0 {
-        if value < 24 { 1 }
-        else if value < 256 { 2 }
-        else if value < 65536 { 3 }
-        else if value < 4294967296 { 5 }
-        else { 9 }
+        if value < 24 {
+            1
+        } else if value < 256 {
+            2
+        } else if value < 65536 {
+            3
+        } else if value < 4294967296 {
+            5
+        } else {
+            9
+        }
     } else {
         let abs_val = (-1 - value) as u64;
-        if abs_val < 24 { 1 }
-        else if abs_val < 256 { 2 }
-        else if abs_val < 65536 { 3 }
-        else if abs_val < 4294967296 { 5 }
-        else { 9 }
+        if abs_val < 24 {
+            1
+        } else if abs_val < 256 {
+            2
+        } else if abs_val < 65536 {
+            3
+        } else if abs_val < 4294967296 {
+            5
+        } else {
+            9
+        }
     }
 }
 

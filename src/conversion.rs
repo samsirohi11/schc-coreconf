@@ -219,6 +219,7 @@ fn yang_entry_to_field(entry: &Value) -> Result<Field> {
         cda,
         mo_val,
         parsed_tv: None,
+        fl_func: None,
     })
 }
 
@@ -471,6 +472,7 @@ mod tests {
                 mo_val: None,
                 di: None,
                 parsed_tv: None,
+                fl_func: None,
             }],
         };
 

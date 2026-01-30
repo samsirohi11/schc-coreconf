@@ -30,7 +30,7 @@ use schc_coreconf::{
 
 // M-Rules in SOR (CORECONF CBOR) format
 const M_RULES_PATH: &str = "samples/m-rules.sor";
-const BASE_RULES_PATH: &str = "rules/base-ipv6-udp.sor";
+const DEFAULT_RULES_PATH: &str = "rules/base-ipv6-udp.sor";
 const SID_FILE_PATH: &str = "samples/ietf-schc@2026-01-12.sid";
 
 fn main() -> std::io::Result<()> {
@@ -49,6 +49,11 @@ fn main() -> std::io::Result<()> {
         .and_then(|i| args.get(i + 1))
         .and_then(|s| s.parse().ok())
         .unwrap_or(5684u16);
+    let verbose = args.iter().any(|a| a == "--verbose" || a == "-v");
+    let rules_path = args.iter().position(|a| a == "--rules")
+        .and_then(|i| args.get(i + 1))
+        .map(|s| s.as_str())
+        .unwrap_or(DEFAULT_RULES_PATH);
 
     println!("============================================================");
     println!("            SCHC Core (Network Endpoint)");
@@ -64,8 +69,8 @@ fn main() -> std::io::Result<()> {
     println!("  Loaded {} M-Rules (IDs {}-{})", m_rules.rules().len(), m_rules.reserved_range().0, m_rules.reserved_range().1);
 
     // Load base application rules from SOR (CORECONF CBOR format)
-    println!("Loading base rules from: {}", BASE_RULES_PATH);
-    let base_rules = load_sor_rules(BASE_RULES_PATH, &sid_file)
+    println!("Loading base rules from: {}", rules_path);
+    let base_rules = load_sor_rules(rules_path, &sid_file)
         .expect("Failed to load base rules from SOR");
     println!("  Loaded {} application rule(s)", base_rules.len());
     for rule in &base_rules {
@@ -220,6 +225,10 @@ fn main() -> std::io::Result<()> {
                     
                     println!("  Rule ID: {}/{}", rule_id, rule_id_length);
                     println!("  Decompressed: {} bytes", decompressed.len());
+                    
+                    if verbose {
+                        println!("  SCHC data: {:02x?}", &data_buf[..len.min(32)]);
+                    }
 
                     // Parse and display IPv6/UDP headers
                     if decompressed.len() >= 48 {

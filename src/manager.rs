@@ -240,7 +240,11 @@ impl SchcCoreconfManager {
             log::info!("Allocated rule ID {}/{}", rule_id.0, rule_id.1);
             Some(rule_id)
         } else {
-            log::warn!("No available rule IDs from base {}/{}", base_rule.0, base_rule.1);
+            log::warn!(
+                "No available rule IDs from base {}/{}",
+                base_rule.0,
+                base_rule.1
+            );
             None
         }
     }
@@ -255,6 +259,14 @@ impl SchcCoreconfManager {
     /// - Attempting to modify an M-Rule
     /// - Rule ID is blocked during deletion guard period
     pub fn provision_rule(&mut self, rule: Rule) -> Result<()> {
+        // Validate rule ID length is within valid range (1-32 bits per SCHC spec)
+        if rule.rule_id_length == 0 || rule.rule_id_length > 32 {
+            return Err(Error::Conversion(format!(
+                "Invalid rule-id-length: {} (must be 1-32)",
+                rule.rule_id_length
+            )));
+        }
+
         // Validate not an M-Rule
         self.m_rules.validate_modification(rule.rule_id)?;
 
@@ -295,7 +307,8 @@ impl SchcCoreconfManager {
             );
             self.guard_period
                 .mark_active(rule.rule_id, rule.rule_id_length);
-            self.known_rule_ids.insert((rule.rule_id, rule.rule_id_length));
+            self.known_rule_ids
+                .insert((rule.rule_id, rule.rule_id_length));
             self.app_rules.push(rule);
         }
 
@@ -404,8 +417,12 @@ impl SchcCoreconfManager {
     /// compression. The returned rule should be provisioned to both
     /// endpoints via CORECONF.
     pub fn suggest_rule(&mut self) -> Option<Rule> {
-        // Get the base rule first (before mutable borrow of learner)
-        let base_rule = self.active_rules().first().cloned()?.clone();
+        // Check if we have active rules first
+        let active_rules = self.active_rules();
+        if active_rules.is_empty() {
+            return None;
+        }
+        let base_rule = active_rules[0].clone();
 
         // Now we can borrow learner mutably
         let learner = self.learner.as_mut()?;
@@ -538,7 +555,7 @@ impl SchcCoreconfManager {
     }
 
     /// Apply iPATCH-style modifications to a rule
-    /// 
+    ///
     /// Supports both:
     /// - Field-ID based: `{"entry": [{"field-id": "fid-ipv6-flowlabel", ...}]}`
     /// - Entry-index based: `{"entry": [{"entry-index": 2, "matching-operator-sid": 2900, ...}]}`
@@ -551,9 +568,12 @@ impl SchcCoreconfManager {
                     let idx = entry_idx as usize;
                     if idx < rule.compression.len() {
                         let field = &mut rule.compression[idx];
-                        
+
                         // Apply MO by SID
-                        if let Some(mo_sid) = entry_mod.get("matching-operator-sid").and_then(|m| m.as_i64()) {
+                        if let Some(mo_sid) = entry_mod
+                            .get("matching-operator-sid")
+                            .and_then(|m| m.as_i64())
+                        {
                             use schc::rule::MatchingOperator;
                             // Map SID to MatchingOperator
                             field.mo = match mo_sid {
@@ -564,9 +584,12 @@ impl SchcCoreconfManager {
                                 _ => field.mo,
                             };
                         }
-                        
+
                         // Apply CDA by SID
-                        if let Some(cda_sid) = entry_mod.get("comp-decomp-action-sid").and_then(|c| c.as_i64()) {
+                        if let Some(cda_sid) = entry_mod
+                            .get("comp-decomp-action-sid")
+                            .and_then(|c| c.as_i64())
+                        {
                             use schc::rule::CompressionAction;
                             field.cda = match cda_sid {
                                 2920 => CompressionAction::NotSent,
@@ -577,21 +600,29 @@ impl SchcCoreconfManager {
                                 _ => field.cda,
                             };
                         }
-                        
+
                         // Apply target value from bytes
-                        if let Some(tv_b64) = entry_mod.get("target-value-bytes").and_then(|t| t.as_str()) {
+                        if let Some(tv_b64) =
+                            entry_mod.get("target-value-bytes").and_then(|t| t.as_str())
+                        {
                             use base64::Engine;
-                            if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(tv_b64) {
+                            if let Ok(bytes) =
+                                base64::engine::general_purpose::STANDARD.decode(tv_b64)
+                            {
                                 field.tv = Some(Self::bytes_to_internal_tv(&bytes, field.fid));
                                 if let Err(e) = field.parse_tv() {
-                                    log::warn!("Failed to parse target value for entry {}: {}", idx, e);
+                                    log::warn!(
+                                        "Failed to parse target value for entry {}: {}",
+                                        idx,
+                                        e
+                                    );
                                 }
                             }
                         }
                     }
                     continue;
                 }
-                
+
                 // Fall back to field-id based modification
                 if let Some(fid_str) = entry_mod.get("field-id").and_then(|f| f.as_str()) {
                     // Find matching field in rule
@@ -623,7 +654,11 @@ impl SchcCoreconfManager {
                             }
                             // Re-parse target value after modifications
                             if let Err(e) = field.parse_tv() {
-                                log::warn!("Failed to parse target value for field {:?}: {}", field.fid, e);
+                                log::warn!(
+                                    "Failed to parse target value for field {:?}: {}",
+                                    field.fid,
+                                    e
+                                );
                             }
                         }
                     }
@@ -640,7 +675,7 @@ impl SchcCoreconfManager {
     /// Internal format: numeric value (for ports, etc.) or hex string (for addresses)
     fn convert_yang_target_value(yang_tv: &Value, fid: FieldId) -> Value {
         use base64::Engine;
-        
+
         // Try to extract the first value from the YANG array format
         if let Some(arr) = yang_tv.as_array() {
             if let Some(first) = arr.first() {
@@ -653,7 +688,7 @@ impl SchcCoreconfManager {
                 }
             }
         }
-        
+
         // If it's already in a simple format, return as-is
         yang_tv.clone()
     }
@@ -672,8 +707,7 @@ impl SchcCoreconfManager {
         if fid_str.ends_with("PREFIX") && bytes.len() == 8 {
             let prefix = format!(
                 "{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}::/64",
-                bytes[0], bytes[1], bytes[2], bytes[3],
-                bytes[4], bytes[5], bytes[6], bytes[7]
+                bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7]
             );
             return Value::String(prefix);
         }
@@ -728,11 +762,19 @@ impl SchcCoreconfManager {
     }
 
     /// Get valid binary tree derivation options for a rule
+    ///
+    /// # Panics
+    /// Panics if from.1 >= 32 (rule ID length must be less than 32 bits)
     pub fn get_derivation_options(from: (u32, u8)) -> [(u32, u8); 2] {
-        let new_length = from.1 + 1;
+        assert!(
+            from.1 < 32,
+            "Rule ID length must be less than 32 bits, got {}",
+            from.1
+        );
+        let new_length = from.1.saturating_add(1);
         [
-            (from.0, new_length),                 // Append 0
-            (from.0 | (1 << from.1), new_length), // Append 1
+            (from.0, new_length),                    // Append 0
+            (from.0 | (1u32 << from.1), new_length), // Append 1
         ]
     }
 }
@@ -756,6 +798,7 @@ mod tests {
                 mo_val: None,
                 di: None,
                 parsed_tv: None,
+                fl_func: None,
             }],
         }
     }
@@ -873,6 +916,7 @@ mod tests {
                 mo_val: None,
                 di: None,
                 parsed_tv: None,
+                fl_func: None,
             }],
         }];
 

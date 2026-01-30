@@ -43,7 +43,7 @@ use schc_coreconf::{
 };
 
 const M_RULES_PATH: &str = "samples/m-rules.sor";
-const BASE_RULES_PATH: &str = "rules/base-ipv6-udp.sor";
+const DEFAULT_RULES_PATH: &str = "rules/base-ipv6-udp.sor";
 const SID_FILE_PATH: &str = "samples/ietf-schc@2026-01-12.sid";
 
 /// Device state that persists across commands
@@ -73,6 +73,9 @@ struct DeviceState {
     learning_enabled: bool,
 
     show_overhead: bool,
+    
+    // Verbose mode for debug output
+    verbose: bool,
 }
 
 impl DeviceState {
@@ -102,6 +105,7 @@ impl DeviceState {
             derived_rule: None,
             learning_enabled: false,
             show_overhead,
+            verbose: false,
         }
     }
 
@@ -189,7 +193,7 @@ impl DeviceState {
             let rules: Vec<Rule> = ruleset.rules.to_vec();
             let tree = build_tree(&rules);
 
-            match compress_packet(&tree, &packet, Direction::Up, &rules, false) {
+            match compress_packet(&tree, &packet, Direction::Up, &rules, self.verbose) {
                 Ok(compressed) => {
                     let is_derived = self.derived_rule
                         .map(|(id, _)| id == compressed.rule_id)
@@ -385,12 +389,6 @@ impl DeviceState {
                 // Update state (manager already tracks via duplicate_rule/provision_rule)
                 self.derived_rule = Some((derived_rule_id, derived_rule_id_length));
 
-                // Wait for guard period
-                let guard = self.manager.guard_period();
-                println!("Waiting for guard period ({:?})...", guard);
-                std::thread::sleep(guard);
-                self.manager.tick();
-
                 println!("Rule {}/{} is now active!", derived_rule_id, derived_rule_id_length);
             }
             MessageClass::Response(ResponseType::Conflict) => {
@@ -470,6 +468,11 @@ fn main() -> io::Result<()> {
         .map(|s| s.as_str())
         .unwrap_or("127.0.0.1:5684");
     let show_overhead = args.iter().any(|a| a == "--show-overhead");
+    let verbose = args.iter().any(|a| a == "--verbose" || a == "-v");
+    let rules_path = args.iter().position(|a| a == "--rules")
+        .and_then(|i| args.get(i + 1))
+        .map(|s| s.as_str())
+        .unwrap_or(DEFAULT_RULES_PATH);
 
     println!("============================================================");
     println!("       SCHC Device (IoT Endpoint) - Interactive Mode");
@@ -487,8 +490,8 @@ fn main() -> io::Result<()> {
     let mgmt_compressor = MgmtCompressor::new(&m_rules);
 
     // Load base rules
-    println!("Loading base rules from: {}", BASE_RULES_PATH);
-    let base_rules: Vec<Rule> = load_sor_rules(BASE_RULES_PATH, &sid_file)
+    println!("Loading base rules from: {}", rules_path);
+    let base_rules: Vec<Rule> = load_sor_rules(rules_path, &sid_file)
         .expect("Failed to load base rules");
 
     let base_rule_id = base_rules[0].rule_id;
@@ -522,6 +525,7 @@ fn main() -> io::Result<()> {
         (base_rule_id, base_rule_id_length),
         show_overhead,
     );
+    state.verbose = verbose;
 
     // Interactive loop
     let stdin = io::stdin();
