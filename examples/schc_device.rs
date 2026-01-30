@@ -33,13 +33,16 @@ use std::time::Duration;
 
 use coap_lite::{MessageClass, MessageType, Packet, RequestType, ResponseType};
 use rust_coreconf::SidFile;
-use schc::{build_tree, compress_packet, Direction, MatchingOperator, CompressionAction, Rule};
 use schc::field_id::FieldId;
+use schc::{
+    build_tree, compress_packet, display_tree, CompressionAction, Direction, MatchingOperator, Rule,
+};
 use schc_coreconf::{
-    load_sor_rules, MRuleSet, SchcCoreconfManager,
+    load_sor_rules,
     mgmt_compression::MgmtCompressor,
-    rpc_builder::{build_duplicate_rule_rpc, analyze_rpc_overhead, EntryModification},
-    sor_loader::{mo_to_sid, cda_to_sid},
+    rpc_builder::{analyze_rpc_overhead, build_duplicate_rule_rpc, EntryModification},
+    sor_loader::{cda_to_sid, mo_to_sid},
+    MRuleSet, SchcCoreconfManager,
 };
 
 const M_RULES_PATH: &str = "samples/m-rules.sor";
@@ -73,7 +76,7 @@ struct DeviceState {
     learning_enabled: bool,
 
     show_overhead: bool,
-    
+
     // Verbose mode for debug output
     verbose: bool,
 }
@@ -176,9 +179,12 @@ impl DeviceState {
 
             let payload = format!("Hello from device! Packet #{}", self.packet_count);
             let packet = build_ipv6_udp_packet(
-                &self.src_prefix, &self.src_iid,
-                &self.dst_prefix, &self.dst_iid,
-                self.src_port, self.dst_port,
+                &self.src_prefix,
+                &self.src_iid,
+                &self.dst_prefix,
+                &self.dst_iid,
+                self.src_port,
+                self.dst_port,
                 self.flow_label,
                 payload.as_bytes(),
             );
@@ -189,13 +195,17 @@ impl DeviceState {
                 self.manager.observe_packet(&fields);
             }
 
-            let ruleset = self.manager.compression_ruleset().expect("Failed to get ruleset");
+            let ruleset = self
+                .manager
+                .compression_ruleset()
+                .expect("Failed to get ruleset");
             let rules: Vec<Rule> = ruleset.rules.to_vec();
             let tree = build_tree(&rules);
 
             match compress_packet(&tree, &packet, Direction::Up, &rules, self.verbose) {
                 Ok(compressed) => {
-                    let is_derived = self.derived_rule
+                    let is_derived = self
+                        .derived_rule
                         .map(|(id, _)| id == compressed.rule_id)
                         .unwrap_or(false);
                     let marker = if is_derived { " (DERIVED)" } else { "" };
@@ -209,7 +219,8 @@ impl DeviceState {
                         packet.len() - 14 - payload.len(),
                         compressed.data.len() - payload.len(),
                         (1.0 - (compressed.data.len() - payload.len()) as f64
-                            / (packet.len() - 14 - payload.len()) as f64) * 100.0
+                            / (packet.len() - 14 - payload.len()) as f64)
+                            * 100.0
                     );
 
                     self.data_socket.send(&compressed.data)?;
@@ -221,17 +232,25 @@ impl DeviceState {
 
             // Check if learning mode has a suggestion ready (based on RuleLearner's min_packets)
             if self.learning_enabled && self.manager.has_suggestion() {
-                println!("\n[Learning] RuleLearner ready to suggest (observed {} packets)",
-                    self.manager.learning_stats().map(|s| {
-                        // Extract packet count from stats
-                        s.lines().next().unwrap_or("").to_string()
-                    }).unwrap_or_default());
+                println!(
+                    "\n[Learning] RuleLearner ready to suggest (observed {} packets)",
+                    self.manager
+                        .learning_stats()
+                        .map(|s| {
+                            // Extract packet count from stats
+                            s.lines().next().unwrap_or("").to_string()
+                        })
+                        .unwrap_or_default()
+                );
                 self.derive_from_learning()?;
                 self.learning_enabled = false;
                 self.manager.reset_learning();
                 println!("[Learning] Disabled (rule derived)");
                 if i + 1 < count {
-                    println!("\n--- Continuing with remaining {} packets ---\n", count - i - 1);
+                    println!(
+                        "\n--- Continuing with remaining {} packets ---\n",
+                        count - i - 1
+                    );
                 }
             }
 
@@ -260,20 +279,23 @@ impl DeviceState {
         };
 
         // Allocate a proper rule ID using BFS (instead of learner's offset-based ID)
-        let (derived_rule_id, derived_rule_id_length) = match self.manager.find_next_available_rule_id(self.base_rule) {
-            Some(c) => c,
-            None => {
-                println!("Error: No available rule IDs within limits");
-                return Ok(());
-            }
-        };
+        let (derived_rule_id, derived_rule_id_length) =
+            match self.manager.find_next_available_rule_id(self.base_rule) {
+                Some(c) => c,
+                None => {
+                    println!("Error: No available rule IDs within limits");
+                    return Ok(());
+                }
+            };
         println!(
             "Selected rule ID {}/{} (locally available)",
             derived_rule_id, derived_rule_id_length
         );
 
         // Get the base rule to compare against
-        let base_rule = self.manager.active_rules()
+        let base_rule = self
+            .manager
+            .active_rules()
             .into_iter()
             .find(|r| r.rule_id == self.base_rule.0 && r.rule_id_length == self.base_rule.1)
             .cloned()
@@ -289,11 +311,13 @@ impl DeviceState {
 
         println!("Learned {} field modifications:", modifications.len());
         for m in &modifications {
-            println!("  Entry {}: MO={:?}, CDA={:?}, TV={} bytes",
+            println!(
+                "  Entry {}: MO={:?}, CDA={:?}, TV={} bytes",
                 m.entry_index,
                 m.matching_operator.map(|s| format!("SID {}", s)),
                 m.comp_decomp_action.map(|s| format!("SID {}", s)),
-                m.target_value.as_ref().map(|v| v.len()).unwrap_or(0));
+                m.target_value.as_ref().map(|v| v.len()).unwrap_or(0)
+            );
         }
 
         self.send_derive_rpc(derived_rule_id, derived_rule_id_length, &modifications)
@@ -320,23 +344,23 @@ impl DeviceState {
 
         // Build modifications for the flow (hardcoded based on device state)
         let modifications = vec![
-            EntryModification::new(2)  // IPV6.FL
+            EntryModification::new(2) // IPV6.FL
                 .with_target_value_bytes(self.flow_label.to_be_bytes()[1..4].to_vec())
                 .with_mo(mo_to_sid(&MatchingOperator::Equal))
                 .with_cda(cda_to_sid(&CompressionAction::NotSent)),
-            EntryModification::new(7)  // IPV6.DEV_IID
+            EntryModification::new(7) // IPV6.DEV_IID
                 .with_target_value_bytes(self.src_iid.to_vec())
                 .with_mo(mo_to_sid(&MatchingOperator::Equal))
                 .with_cda(cda_to_sid(&CompressionAction::NotSent)),
-            EntryModification::new(9)  // IPV6.APP_IID
+            EntryModification::new(9) // IPV6.APP_IID
                 .with_target_value_bytes(self.dst_iid.to_vec())
                 .with_mo(mo_to_sid(&MatchingOperator::Equal))
                 .with_cda(cda_to_sid(&CompressionAction::NotSent)),
-            EntryModification::new(10)  // UDP.DEV_PORT
+            EntryModification::new(10) // UDP.DEV_PORT
                 .with_target_value_bytes(self.src_port.to_be_bytes().to_vec())
                 .with_mo(mo_to_sid(&MatchingOperator::Equal))
                 .with_cda(cda_to_sid(&CompressionAction::NotSent)),
-            EntryModification::new(11)  // UDP.APP_PORT
+            EntryModification::new(11) // UDP.APP_PORT
                 .with_target_value_bytes(self.dst_port.to_be_bytes().to_vec())
                 .with_mo(mo_to_sid(&MatchingOperator::Equal))
                 .with_cda(cda_to_sid(&CompressionAction::NotSent)),
@@ -346,8 +370,12 @@ impl DeviceState {
     }
 
     /// Send the RPC to derive a rule and apply locally
-    fn send_derive_rpc(&mut self, derived_rule_id: u32, derived_rule_id_length: u8, modifications: &[EntryModification]) -> io::Result<()> {
-
+    fn send_derive_rpc(
+        &mut self,
+        derived_rule_id: u32,
+        derived_rule_id_length: u8,
+        modifications: &[EntryModification],
+    ) -> io::Result<()> {
         // Build and send RPC
         let rpc_cbor = build_duplicate_rule_rpc(
             self.base_rule,
@@ -378,32 +406,44 @@ impl DeviceState {
 
         match response.header.code {
             MessageClass::Response(ResponseType::Changed) => {
-                println!("RPC successful!");
+                println!("[CORECONF] Response: Changed");   
+                println!("[CORECONF] RPC successful!");
 
                 // Apply locally
                 let local_mods = build_local_mods(&modifications);
                 self.manager
-                    .duplicate_rule(self.base_rule, (derived_rule_id, derived_rule_id_length), Some(&local_mods))
+                    .duplicate_rule(
+                        self.base_rule,
+                        (derived_rule_id, derived_rule_id_length),
+                        Some(&local_mods),
+                    )
                     .expect("Failed to duplicate rule locally");
 
                 // Update state (manager already tracks via duplicate_rule/provision_rule)
                 self.derived_rule = Some((derived_rule_id, derived_rule_id_length));
 
-                println!("Rule {}/{} is now active!", derived_rule_id, derived_rule_id_length);
+                println!(
+                    "[CORECONF] Rule {}/{} is now active!",
+                    derived_rule_id, derived_rule_id_length
+                );
             }
             MessageClass::Response(ResponseType::Conflict) => {
                 // This shouldn't happen if our local tracking is correct,
                 // but handle it gracefully by adding to known set via manager
                 let msg = String::from_utf8_lossy(&response.payload);
-                println!("Conflict (unexpected): {}", msg);
-                println!("Adding {}/{} to known rules and retrying...", derived_rule_id, derived_rule_id_length);
-                self.manager.mark_rule_id_known(derived_rule_id, derived_rule_id_length);
+                println!("[CORECONF] Conflict (unexpected): {}", msg);
+                println!(
+                    "[CORECONF] Adding {}/{} to known rules and retrying...",
+                    derived_rule_id, derived_rule_id_length
+                );
+                self.manager
+                    .mark_rule_id_known(derived_rule_id, derived_rule_id_length);
                 // Recursive retry
                 return self.derive_rule();
             }
             code => {
                 let msg = String::from_utf8_lossy(&response.payload);
-                println!("RPC failed: {:?} - {}", code, msg);
+                println!("[CORECONF] RPC failed: {:?} - {}", code, msg);
             }
         }
 
@@ -448,10 +488,30 @@ impl DeviceState {
         }
 
         // Show what the manager has
-        println!("\nManager active rules: {}", self.manager.active_rules().len());
+        println!(
+            "\nManager active rules: {}",
+            self.manager.active_rules().len()
+        );
         for rule in self.manager.active_rules() {
-            println!("  {}/{}: {} fields", rule.rule_id, rule.rule_id_length, rule.compression.len());
+            println!(
+                "  {}/{}: {} fields",
+                rule.rule_id,
+                rule.rule_id_length,
+                rule.compression.len()
+            );
         }
+
+        // Build and display the rule tree
+        let active_rules: Vec<Rule> = self
+            .manager
+            .active_rules()
+            .iter()
+            .map(|r| (*r).clone())
+            .collect();
+        let tree = build_tree(&active_rules);
+        println!("\nSCHC Rule Tree Structure:");
+        println!("Note: Fields marked with ↑ apply to UP traffic only, ↓ to DOWN traffic only, ↔ to both.\n");
+        display_tree(&tree);
     }
 }
 
@@ -459,17 +519,23 @@ fn main() -> io::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     let args: Vec<String> = std::env::args().collect();
-    let core_mgmt = args.iter().position(|a| a == "--core-mgmt")
+    let core_mgmt = args
+        .iter()
+        .position(|a| a == "--core-mgmt")
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
         .unwrap_or("127.0.0.1:5683");
-    let core_data = args.iter().position(|a| a == "--core-data")
+    let core_data = args
+        .iter()
+        .position(|a| a == "--core-data")
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
         .unwrap_or("127.0.0.1:5684");
     let show_overhead = args.iter().any(|a| a == "--show-overhead");
     let verbose = args.iter().any(|a| a == "--verbose" || a == "-v");
-    let rules_path = args.iter().position(|a| a == "--rules")
+    let rules_path = args
+        .iter()
+        .position(|a| a == "--rules")
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
         .unwrap_or(DEFAULT_RULES_PATH);
@@ -487,16 +553,21 @@ fn main() -> io::Result<()> {
     let m_rules = MRuleSet::from_sor(M_RULES_PATH, &sid_file).expect("Failed to load M-Rules");
     println!("  Loaded {} M-Rules", m_rules.rules().len());
 
-    let mgmt_compressor = MgmtCompressor::new(&m_rules);
+    let mgmt_compressor = MgmtCompressor::new(&m_rules, verbose);
 
     // Load base rules
     println!("Loading base rules from: {}", rules_path);
-    let base_rules: Vec<Rule> = load_sor_rules(rules_path, &sid_file)
-        .expect("Failed to load base rules");
+    let base_rules: Vec<Rule> =
+        load_sor_rules(rules_path, &sid_file).expect("Failed to load base rules");
 
     let base_rule_id = base_rules[0].rule_id;
     let base_rule_id_length = base_rules[0].rule_id_length;
-    println!("  Base rule: {}/{} ({} fields)", base_rule_id, base_rule_id_length, base_rules[0].compression.len());
+    println!(
+        "  Base rule: {}/{} ({} fields)",
+        base_rule_id,
+        base_rule_id_length,
+        base_rules[0].compression.len()
+    );
 
     // Create manager
     let estimated_rtt = Duration::from_millis(100);
@@ -545,9 +616,7 @@ fn main() -> io::Result<()> {
 
         match parts[0] {
             "send" => {
-                let count = parts.get(1)
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(5);
+                let count = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(5);
                 state.send_packets(count)?;
             }
             "derive" => {
@@ -564,7 +633,10 @@ fn main() -> io::Result<()> {
                         // Enable learning with specified min_packets threshold
                         state.manager.enable_learning(min_packets);
                         state.learning_enabled = true;
-                        println!("Learning mode enabled. RuleLearner will suggest after {} packets.", min_packets);
+                        println!(
+                            "Learning mode enabled. RuleLearner will suggest after {} packets.",
+                            min_packets
+                        );
                         println!("Fields with constant values will be converted to not-sent.");
                     } else {
                         println!("Invalid argument. Use: learn <N> or learn off");
@@ -604,13 +676,19 @@ fn main() -> io::Result<()> {
                 break;
             }
             cmd => {
-                println!("Unknown command: {}. Type 'help' for available commands.", cmd);
+                println!(
+                    "Unknown command: {}. Type 'help' for available commands.",
+                    cmd
+                );
             }
         }
     }
 
     println!("\n------------------------------------------------------------");
-    println!("Device finished. Total packets sent: {}", state.packet_count);
+    println!(
+        "Device finished. Total packets sent: {}",
+        state.packet_count
+    );
     println!("------------------------------------------------------------");
 
     Ok(())
@@ -646,7 +724,9 @@ fn build_local_mods(modifications: &[EntryModification]) -> serde_json::Value {
 fn build_learned_modifications(base_rule: &Rule, suggested_rule: &Rule) -> Vec<EntryModification> {
     let mut modifications = Vec::new();
 
-    for (idx, (base_field, suggested_field)) in base_rule.compression.iter()
+    for (idx, (base_field, suggested_field)) in base_rule
+        .compression
+        .iter()
         .zip(suggested_rule.compression.iter())
         .enumerate()
     {
@@ -686,12 +766,16 @@ fn build_learned_modifications(base_rule: &Rule, suggested_rule: &Rule) -> Vec<E
 fn json_value_to_bytes_for_field(tv: &serde_json::Value, fid: FieldId) -> Option<Vec<u8>> {
     // Determine expected byte length based on field type
     let expected_len = match fid {
-        FieldId::Ipv6DevIid | FieldId::Ipv6AppIid
-        | FieldId::Ipv6SrcIid | FieldId::Ipv6DstIid => Some(8),
-        FieldId::Ipv6DevPrefix | FieldId::Ipv6AppPrefix
-        | FieldId::Ipv6SrcPrefix | FieldId::Ipv6DstPrefix => Some(8),
-        FieldId::UdpDevPort | FieldId::UdpAppPort
-        | FieldId::UdpSrcPort | FieldId::UdpDstPort => Some(2),
+        FieldId::Ipv6DevIid | FieldId::Ipv6AppIid | FieldId::Ipv6SrcIid | FieldId::Ipv6DstIid => {
+            Some(8)
+        }
+        FieldId::Ipv6DevPrefix
+        | FieldId::Ipv6AppPrefix
+        | FieldId::Ipv6SrcPrefix
+        | FieldId::Ipv6DstPrefix => Some(8),
+        FieldId::UdpDevPort | FieldId::UdpAppPort | FieldId::UdpSrcPort | FieldId::UdpDstPort => {
+            Some(2)
+        }
         FieldId::Ipv6Fl => Some(3),
         _ => None, // Use minimal representation
     };
@@ -775,18 +859,20 @@ fn parse_ipv6_prefix(s: &str) -> Option<Vec<u8>> {
 
 /// Build an IPv6/UDP packet
 fn build_ipv6_udp_packet(
-    src_prefix: &[u8; 8], src_iid: &[u8; 8],
-    dst_prefix: &[u8; 8], dst_iid: &[u8; 8],
-    src_port: u16, dst_port: u16,
-    flow_label: u32, payload: &[u8],
+    src_prefix: &[u8; 8],
+    src_iid: &[u8; 8],
+    dst_prefix: &[u8; 8],
+    dst_iid: &[u8; 8],
+    src_port: u16,
+    dst_port: u16,
+    flow_label: u32,
+    payload: &[u8],
 ) -> Vec<u8> {
     let mut packet = Vec::with_capacity(14 + 40 + 8 + payload.len());
 
     // Ethernet header (14 bytes)
     packet.extend_from_slice(&[
-        0x00, 0x11, 0x22, 0x33, 0x44, 0x55,
-        0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB,
-        0x86, 0xDD,
+        0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0x86, 0xDD,
     ]);
 
     // IPv6 Header
@@ -827,9 +913,7 @@ fn build_mgmt_packet(coap_payload: &[u8]) -> Vec<u8> {
 
     // Ethernet
     packet.extend_from_slice(&[
-        0x00, 0x11, 0x22, 0x33, 0x44, 0x55,
-        0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB,
-        0x86, 0xDD,
+        0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0x86, 0xDD,
     ]);
 
     // IPv6
@@ -871,22 +955,29 @@ fn send_coap_post(
     coap_packet.add_option(coap_lite::CoapOption::ContentFormat, vec![0x01, 0x39]);
     coap_packet.payload = payload.to_vec();
 
-    let coap_bytes = coap_packet.to_bytes().map_err(|e| io::Error::other(e.to_string()))?;
+    let coap_bytes = coap_packet
+        .to_bytes()
+        .map_err(|e| io::Error::other(e.to_string()))?;
     let full_packet = build_mgmt_packet(&coap_bytes);
 
-    let compressed = mgmt_compressor.compress(&full_packet, Direction::Up)
+    let compressed = mgmt_compressor
+        .compress(&full_packet, Direction::Up)
         .map_err(|e| io::Error::other(e.to_string()))?;
 
-    println!("  MGMT: {} -> {} bytes ({:.1}% compression)",
-        full_packet.len() - 14, compressed.len(),
-        (1.0 - compressed.len() as f64 / (full_packet.len() - 14) as f64) * 100.0);
+    println!(
+        "[CORECONF] MGMT compressed: {} -> {} bytes ({:.1}% compression)",
+        full_packet.len() - 14,
+        compressed.len(),
+        (1.0 - compressed.len() as f64 / (full_packet.len() - 14) as f64) * 100.0
+    );
 
     socket.send(&compressed)?;
 
     let mut buf = [0u8; 1500];
     let len = socket.recv(&mut buf)?;
 
-    let decompressed = mgmt_compressor.decompress(&buf[..len], Direction::Down)
+    let decompressed = mgmt_compressor
+        .decompress(&buf[..len], Direction::Down)
         .map_err(|e| io::Error::other(e.to_string()))?;
 
     if decompressed.len() < 48 {
@@ -902,7 +993,9 @@ fn print_mrule_compression_overhead(mgmt_compressor: &MgmtCompressor, rpc_payloa
     let mut coap_packet = coap_lite::Packet::new();
     coap_packet.header.message_id = 1;
     coap_packet.header.code = coap_lite::MessageClass::Request(coap_lite::RequestType::Post);
-    coap_packet.header.set_type(coap_lite::MessageType::Confirmable);
+    coap_packet
+        .header
+        .set_type(coap_lite::MessageType::Confirmable);
     coap_packet.set_token(vec![]);
     coap_packet.add_option(coap_lite::CoapOption::UriPath, b"c".to_vec());
     coap_packet.add_option(coap_lite::CoapOption::ContentFormat, vec![0x01, 0x39]); // 313
@@ -914,7 +1007,8 @@ fn print_mrule_compression_overhead(mgmt_compressor: &MgmtCompressor, rpc_payloa
     let full_packet = build_mgmt_packet(&coap_bytes);
 
     // Compress with M-Rules
-    let compressed = mgmt_compressor.compress(&full_packet, Direction::Up)
+    let compressed = mgmt_compressor
+        .compress(&full_packet, Direction::Up)
         .unwrap_or_default();
 
     // Calculate overhead components
@@ -936,29 +1030,66 @@ fn print_mrule_compression_overhead(mgmt_compressor: &MgmtCompressor, rpc_payloa
     println!("╠═══════════════════════════════════════════════════════════════╣");
     println!("║ ORIGINAL PACKET (before SCHC compression)                     ║");
     println!("╠───────────────────────────────────────────────────────────────╣");
-    println!("║  IPv6 header:                         {:>3} bytes               ║", ipv6_header);
-    println!("║  UDP header:                          {:>3} bytes               ║", udp_header);
-    println!("║  CoAP header (incl. options):         {:>3} bytes               ║", coap_header);
-    println!("║  CBOR RPC payload:                    {:>3} bytes               ║", rpc_payload.len());
+    println!(
+        "║  IPv6 header:                         {:>3} bytes               ║",
+        ipv6_header
+    );
+    println!(
+        "║  UDP header:                          {:>3} bytes               ║",
+        udp_header
+    );
+    println!(
+        "║  CoAP header (incl. options):         {:>3} bytes               ║",
+        coap_header
+    );
+    println!(
+        "║  CBOR RPC payload:                    {:>3} bytes               ║",
+        rpc_payload.len()
+    );
     println!("║                                      ─────────                 ║");
-    println!("║  Total (excl. Ethernet):              {:>3} bytes               ║", original_total);
+    println!(
+        "║  Total (excl. Ethernet):              {:>3} bytes               ║",
+        original_total
+    );
     println!("╠═══════════════════════════════════════════════════════════════╣");
     println!("║ COMPRESSED PACKET (after M-Rule compression)                  ║");
     println!("╠───────────────────────────────────────────────────────────────╣");
-    println!("║  SCHC Rule ID:                        {:>3} bits ({:.1} bytes)    ║",
-        schc_rule_id_bits, schc_rule_id_bits as f64 / 8.0);
-    println!("║  SCHC residue (compressed headers):   {:>3} bytes               ║", schc_residue);
-    println!("║  CBOR RPC payload (unchanged):        {:>3} bytes               ║", rpc_payload.len());
+    println!(
+        "║  SCHC Rule ID:                        {:>3} bits ({:.1} bytes)    ║",
+        schc_rule_id_bits,
+        schc_rule_id_bits as f64 / 8.0
+    );
+    println!(
+        "║  SCHC residue (compressed headers):   {:>3} bytes               ║",
+        schc_residue
+    );
+    println!(
+        "║  CBOR RPC payload (unchanged):        {:>3} bytes               ║",
+        rpc_payload.len()
+    );
     println!("║                                      ─────────                 ║");
-    println!("║  Total compressed:                    {:>3} bytes               ║", compressed.len());
+    println!(
+        "║  Total compressed:                    {:>3} bytes               ║",
+        compressed.len()
+    );
     println!("╠═══════════════════════════════════════════════════════════════╣");
     println!("║ COMPRESSION SUMMARY                                           ║");
     println!("╠───────────────────────────────────────────────────────────────╣");
-    println!("║  Original headers:                    {:>3} bytes               ║", original_headers);
-    println!("║  Compressed headers (Rule ID+residue):{:>3} bytes               ║", schc_residue);
-    println!("║  Header compression ratio:           {:>4.1}%                    ║",
-        (1.0 - schc_residue as f64 / original_headers as f64) * 100.0);
-    println!("║  Overall compression ratio:          {:>4.1}%                    ║",
-        (1.0 - compressed.len() as f64 / original_total as f64) * 100.0);
+    println!(
+        "║  Original headers:                    {:>3} bytes               ║",
+        original_headers
+    );
+    println!(
+        "║  Compressed headers (Rule ID+residue):{:>3} bytes               ║",
+        schc_residue
+    );
+    println!(
+        "║  Header compression ratio:           {:>4.1}%                    ║",
+        (1.0 - schc_residue as f64 / original_headers as f64) * 100.0
+    );
+    println!(
+        "║  Overall compression ratio:          {:>4.1}%                    ║",
+        (1.0 - compressed.len() as f64 / original_total as f64) * 100.0
+    );
     println!("╚═══════════════════════════════════════════════════════════════╝\n");
 }

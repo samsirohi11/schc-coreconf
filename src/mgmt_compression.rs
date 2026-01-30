@@ -17,13 +17,16 @@ use crate::m_rules::MRuleSet;
 pub struct MgmtCompressor {
     /// M-Rules for compression
     m_rules: Vec<Rule>,
+    /// Debug mode
+    debug: bool,
 }
 
 impl MgmtCompressor {
     /// Create a new management traffic compressor from M-Rules
-    pub fn new(m_rules: &MRuleSet) -> Self {
+    pub fn new(m_rules: &MRuleSet, debug: bool) -> Self {
         Self {
             m_rules: m_rules.rules().to_vec(),
+            debug,
         }
     }
 
@@ -41,15 +44,15 @@ impl MgmtCompressor {
     pub fn compress(&self, packet: &[u8], direction: Direction) -> Result<Vec<u8>> {
         let tree = build_tree(&self.m_rules);
 
-        match compress_packet(&tree, packet, direction, &self.m_rules, false) {
+        match compress_packet(&tree, packet, direction, &self.m_rules, self.debug) {
             Ok(compressed) => {
-                log::debug!(
-                    "MGMT compressed: {} bytes -> {} bytes (rule {}/{})",
-                    packet.len(),
-                    compressed.data.len(),
-                    compressed.rule_id,
-                    compressed.rule_id_length
-                );
+                if self.debug {
+                    println!(
+                        "Compressed with Rule {}/{}",
+                        compressed.rule_id,
+                        compressed.rule_id_length
+                    );
+                }
                 Ok(compressed.data)
             }
             Err(e) => Err(Error::Schc(format!("Compression failed: {:?}", e))),
@@ -70,12 +73,13 @@ impl MgmtCompressor {
     pub fn decompress(&self, compressed: &[u8], direction: Direction) -> Result<Vec<u8>> {
         match decompress_packet(compressed, &self.m_rules, direction, None) {
             Ok(result) => {
-                log::debug!(
-                    "MGMT decompressed: {} bytes -> {} bytes (rule {})",
-                    compressed.len(),
-                    result.full_data.len(),
-                    result.rule_id
-                );
+                if self.debug {
+                    println!(
+                        "Decompressed with Rule {}/{}",
+                        result.rule_id,
+                        result.rule_id_length
+                    );
+                }
                 Ok(result.full_data)
             }
             Err(e) => Err(Error::Schc(format!("Decompression failed: {:?}", e))),
@@ -111,7 +115,7 @@ impl MgmtCompressor {
 pub fn compress_coap_payload(payload: &[u8], _m_rules: &MRuleSet) -> Vec<u8> {
     // For simple payloads, compression may not help
     // The M-Rules compress full IPv6/UDP/CoAP headers, not just payloads
-    // 
+    //
     // To fully benefit, the entire CoAP message should be compressed
     // as part of the IPv6/UDP/CoAP stack.
     //
@@ -184,7 +188,7 @@ mod tests {
     #[test]
     fn test_mgmt_compressor_creation() {
         let m_rules = MRuleSet::default_ipv6_coap();
-        let compressor = MgmtCompressor::new(&m_rules);
+        let compressor = MgmtCompressor::new(&m_rules, false);
         assert!(!compressor.m_rules.is_empty());
     }
 }

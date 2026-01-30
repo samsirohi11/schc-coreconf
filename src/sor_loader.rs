@@ -364,7 +364,7 @@ fn parse_fl_value(
                 SID_FL_LENGTH_BYTES => (None, Some(FieldLength::LengthBytes(fl_arg.unwrap_or(0)))),
                 SID_FL_LENGTH_BITS => (None, Some(FieldLength::LengthBits(fl_arg.unwrap_or(0)))),
                 SID_FL_VARIABLE => (None, Some(FieldLength::Variable)),
-                v if v >= 0 && v <= 255 => (Some(v as u16), None), // uint8 fixed length
+                v if (0..=255).contains(&v) => (Some(v as u16), None), // uint8 fixed length
                 _ => (None, None),                                 // Unknown
             }
         }
@@ -457,7 +457,7 @@ fn extract_first_mo_value(mo_value_array: &CborValue) -> Option<u8> {
         match value {
             CborValue::Integer(i) => {
                 let val: i128 = (*i).into();
-                if val >= 0 && val <= 255 {
+                if (0..=255).contains(&val) {
                     Some(val as u8)
                 } else {
                     None // Value out of u8 range

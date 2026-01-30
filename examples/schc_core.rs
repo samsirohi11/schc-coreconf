@@ -82,7 +82,7 @@ fn main() -> std::io::Result<()> {
     let estimated_rtt = Duration::from_millis(100);
     
     // Create management compressor for M-rule based compression
-    let mgmt_compressor = MgmtCompressor::new(&m_rules);
+    let mgmt_compressor = MgmtCompressor::new(&m_rules, verbose);
     
     let manager = SchcCoreconfManager::new(m_rules.clone(), base_rules, estimated_rtt);
     println!("\nGuard period: {:?}", manager.guard_period());
@@ -150,7 +150,7 @@ fn main() -> std::io::Result<()> {
                         let request = CoapRequest::from_packet(packet, src);
                         let path = request.get_path();
 
-                        println!("  {} {} /{} from {}",
+                        println!("[CORECONF] MGMT Request: {} {} /{} from {}",
                             format_method(&request.message.header.code),
                             request.message.payload.len(),
                             path,
@@ -168,21 +168,21 @@ fn main() -> std::io::Result<()> {
                         
                         match mgmt_compressor.compress(&response_packet, Direction::Down) {
                             Ok(compressed_response) => {
-                                println!("  Response: {:?} (compressed {} -> {} bytes)",
+                                println!("[CORECONF] Response: {:?} (compressed {} -> {} bytes)",
                                     response.header.code,
                                     response_packet.len() - 14,
                                     compressed_response.len());
                                 mgmt_socket.send_to(&compressed_response, src)?;
                             }
                             Err(e) => {
-                                println!("  Response compression failed: {}, sending raw", e);
+                                println!("[CORECONF] Response compression failed: {}, sending raw", e);
                                 mgmt_socket.send_to(&response_coap_bytes, src)?;
                             }
                         }
 
                         // Show current rules after management operation
                         let mgr = coreconf_handler.manager().read().unwrap();
-                        println!("  Active rules: {} M-Rules + {} app rules",
+                        println!("[CORECONF] Active rules: {} M-Rules + {} app rules",
                             mgr.m_rules().rules().len(),
                             mgr.active_rules().len());
                     }
