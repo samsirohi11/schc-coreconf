@@ -1,8 +1,72 @@
 # schc-coreconf
 
+[![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 CoRECONF-based rule management for SCHC (Static Context Header Compression).
 
-This crate bridges SCHC compression with CoRECONF, enabling remote management of SCHC rules via CoAP/CBOR using YANG data models per [draft-toutain-schc-coreconf-management](https://datatracker.ietf.org/doc/draft-toutain-schc-coreconf-management/) with some optimizations.
+This crate bridges SCHC compression with CoRECONF, enabling remote management of SCHC rules via CoAP/CBOR using YANG data models per [draft-toutain-schc-coreconf-management](https://datatracker.ietf.org/doc/draft-toutain-schc-coreconf-management/).
+
+## Quick Start
+
+Add to your `Cargo.toml`:
+
+```toml
+[dependencies]
+schc-coreconf = { git = "https://github.com/samsirohi11/schc-coreconf.git" }
+```
+
+```rust
+use schc_coreconf::{SchcCoreconfManager, MRuleSet, load_sor_rules};
+use rust_coreconf::SidFile;
+use std::time::Duration;
+
+// Load SID file for YANG mapping
+let sid_file = SidFile::from_file("samples/ietf-schc@2026-01-12.sid")?;
+
+// Load M-Rules (management traffic compression) and application rules
+let m_rules = MRuleSet::from_sor("samples/m-rules.sor", &sid_file)?;
+let app_rules = load_sor_rules("rules/base-ipv6-udp.sor", &sid_file)?;
+
+// Create manager with RTT-based guard period
+let mut manager = SchcCoreconfManager::new(
+    m_rules,
+    app_rules,
+    Duration::from_millis(100),
+);
+
+// Enable progressive learning (auto-derive after 50 packets)
+manager.enable_learning(50);
+
+// Get combined ruleset for compression
+let ruleset = manager.compression_ruleset()?;
+```
+
+## Running the Examples
+
+```bash
+# Clone with submodules
+git clone --recurse-submodules https://github.com/samsirohi11/schc-coreconf.git
+cd schc-coreconf
+
+# Run Core (terminal 1)
+cargo run --example schc_core
+
+# Run Device (terminal 2)
+cargo run --example schc_device
+```
+
+### Device Commands
+
+| Command     | Description                                              |
+| ----------- | -------------------------------------------------------- |
+| `send [N]`  | Send N packets (default 5) using best available rule     |
+| `derive`    | Manually derive optimized rule (hardcoded modifications) |
+| `learn [N]` | Enable learning mode (auto-derive after N packets)       |
+| `learn off` | Disable learning mode                                    |
+| `rules`     | Show current rules and learning status                   |
+| `help`      | Show available commands                                  |
+| `quit`      | Exit                                                     |
 
 ## Architecture
 
@@ -61,36 +125,34 @@ The system uses a layered rule approach:
 ### Rule Derivation Flow
 
 ```
-┌─────────────────┐     observe packets     ┌─────────────────┐
-│   Base Rule     │ ────────────────────►   │   RuleLearner   │
-│   8/4           │                         │                 │
-│ FL: ignore      │                         │ Detects:        │
-│ IID: value-sent │                         │ - FL constant   │
-│ Port: value-sent│                         │ - IID constant  │
-└─────────────────┘                         │ - Port constant │
-                                            └────────┬────────┘
-                                                     │ suggest
-                                                     ▼
-┌─────────────────┐     duplicate-rule      ┌─────────────────┐
-│  Derived Rule   │ ◄────────────────────   │  Suggested Rule │
-│   8/5           │        RPC              │                 │
-│ FL: equal/      │                         │ Modifications:  │
-│     not-sent    │                         │ - FL → not-sent │
-│ IID: equal/     │                         │ - IID → not-sent│
-│     not-sent    │                         │ - Port→ not-sent│
-└─────────────────┘                         └─────────────────┘
++-------------------+     observe packets     +-------------------+
+|   Base Rule       | --------------------->  |   RuleLearner     |
+|   8/4             |                         |                   |
+| FL: ignore        |                         | Detects:          |
+| IID: value-sent   |                         | - FL constant     |
+| Port: value-sent  |                         | - IID constant    |
++-------------------+                         | - Port constant   |
+                                              +---------+---------+
+                                                        | suggest
+                                                        v
++-------------------+     duplicate-rule      +-------------------+
+|  Derived Rule     | <--------------------   |  Suggested Rule   |
+|   8/5             |        RPC              |                   |
+| FL: equal/        |                         | Modifications:    |
+|     not-sent      |                         | - FL -> not-sent  |
+| IID: equal/       |                         | - IID -> not-sent |
+|     not-sent      |                         | - Port-> not-sent |
++-------------------+                         +-------------------+
 ```
 
 ### Learning Mode
 
-The RuleLearner observes packet field values and detects constant patterns:
+The `RuleLearner` observes packet field values and detects constant patterns:
 
 1. **Observation**: Each packet's field values are recorded (excluding computed fields like length/checksum)
 2. **Pattern Detection**: After N packets, fields with 100% constant values are identified
 3. **Rule Suggestion**: Constant fields are converted from `value-sent` to `not-sent` with the observed value as target
 4. **Provisioning**: The optimized rule is sent to the peer via `duplicate-rule` RPC and applied locally
-
-This enables progressive optimization without prior knowledge of traffic patterns.
 
 ### Rule ID Allocation
 
@@ -98,10 +160,10 @@ Derived rules follow a binary tree structure per the draft specification:
 
 ```
 Base Rule: 8/4 (binary: 1000)
-    ├── 8/5  (binary: 01000) - append 0
-    └── 24/5 (binary: 11000) - append 1
-        ├── 24/6 (binary: 011000) - append 0
-        └── 56/6 (binary: 111000) - append 1
+    +-- 8/5  (binary: 01000) - append 0
+    +-- 24/5 (binary: 11000) - append 1
+        +-- 24/6 (binary: 011000) - append 0
+        +-- 56/6 (binary: 111000) - append 1
 ```
 
 The manager uses BFS allocation to find available rule IDs, providing balanced tree growth and avoiding conflicts.
@@ -136,66 +198,6 @@ Rule modifications require synchronization between endpoints. The guard period (
 - **Guard Period**: RTT-based synchronization for high-latency links
 - **Binary Tree Rule IDs**: BFS allocation for proper rule derivation
 - **Learning Mode**: Observe traffic patterns and automatically suggest optimized rules
-
-## Quick Start
-
-```bash
-# Clone with submodules
-git clone --recurse-submodules https://github.com/samsirohi11/schc-coreconf.git
-cd schc-coreconf
-
-# Run Core (in terminal 1)
-cargo run --example schc_core
-
-# Run Device (in terminal 2)
-cargo run --example schc_device
-```
-
-### Device Commands
-
-The interactive device example supports:
-
-| Command     | Description                                              |
-| ----------- | -------------------------------------------------------- |
-| `send [N]`  | Send N packets (default 5) using best available rule     |
-| `derive`    | Manually derive optimized rule (hardcoded modifications) |
-| `learn [N]` | Enable learning mode (auto-derive after N packets)       |
-| `learn off` | Disable learning mode                                    |
-| `rules`     | Show current rules and learning status                   |
-| `help`      | Show available commands                                  |
-| `quit`      | Exit                                                     |
-
-**Learning mode** observes field values across packets and automatically derives a rule when constant patterns are detected.
-
-## Project Structure
-
-```
-schc-coreconf/
-├── schc/               # Git submodule: SCHC compression engine
-├── coreconf/           # Git submodule: rust-coreconf library
-├── src/
-│   ├── lib.rs              # Public API exports
-│   ├── manager.rs          # Unified SchcCoreconfManager
-│   ├── coreconf_adapter.rs # CoAP/CORECONF request handling
-│   ├── rpc_builder.rs      # SID-encoded RPC builder
-│   ├── sor_loader.rs       # SOR (CBOR) rule loading
-│   ├── mgmt_compression.rs # Management traffic compression
-│   ├── m_rules.rs          # M-Rule management
-│   ├── guard_period.rs     # RTT-based synchronization
-│   ├── rule_learner.rs     # Progressive pattern learning
-│   ├── identities.rs       # YANG ↔ SCHC identity mappings
-│   └── conversion.rs       # YANG ↔ SCHC rule conversion
-├── samples/
-│   ├── m-rules.json        # M-Rules in JSON format
-│   ├── m-rules.sor         # M-Rules in SOR (CBOR) format
-│   └── ietf-schc@*.sid     # SID file for YANG mapping
-├── rules/
-│   ├── base-ipv6-udp.json  # Base rule in JSON
-│   └── base-ipv6-udp.sor   # Base rule in SOR format
-└── examples/
-    ├── schc_core.rs        # Network endpoint example
-    └── schc_device.rs      # IoT device example
-```
 
 ## Usage
 
@@ -239,7 +241,6 @@ for packet in packets {
 // Check for suggestions
 if manager.has_suggestion() {
     if let Some(rule) = manager.suggest_rule() {
-        // Send RPC to peer and provision locally
         manager.provision_rule(rule)?;
     }
 }
@@ -275,7 +276,7 @@ let rpc = build_duplicate_rule_rpc(
 // Find next available rule ID using BFS
 let base_rule = (8, 4);
 if let Some((id, len)) = manager.find_next_available_rule_id(base_rule) {
-    println!("Available: {}/{}", id, len);  // e.g., 8/5 or 24/5
+    println!("Available: {}/{}", id, len);
 }
 
 // Allocate and reserve
@@ -288,7 +289,7 @@ if let Some(rule_id) = manager.allocate_rule_id(base_rule) {
 
 | Format           | Example                                    | Size       |
 | ---------------- | ------------------------------------------ | ---------- |
-| **JSON strings** | `{"input":{"source-rule-id-value":8,...}}` | ~150 bytes |
+| **JSON strings** | `{"input":{"source-rule-id-value":8,...}}`  | ~150 bytes |
 | **SID deltas**   | `{5201:{1:8,2:4,3:8,4:5,...}}`             | ~40 bytes  |
 
 The SID-based encoding provides ~70% size reduction for RPC messages.
@@ -302,12 +303,46 @@ With learned rules, header compression improves significantly:
 | IPv6/UDP headers  | ~60%      | ~90%         | +30%        |
 | CORECONF (M-Rule) | ~85%      | N/A          | Built-in    |
 
+## Project Structure
+
+```
+schc-coreconf/
+  schc/                 # Git submodule: SCHC compression engine
+  coreconf/             # Git submodule: rust-coreconf library
+  src/
+    lib.rs              # Public API exports
+    manager.rs          # Unified SchcCoreconfManager
+    coreconf_adapter.rs # CoAP/CORECONF request handling
+    rpc_builder.rs      # SID-encoded RPC builder
+    sor_loader.rs       # SOR (CBOR) rule loading
+    mgmt_compression.rs # Management traffic compression
+    m_rules.rs          # M-Rule management
+    guard_period.rs     # RTT-based synchronization
+    rule_learner.rs     # Progressive pattern learning
+    identities.rs       # YANG <-> SCHC identity mappings
+    conversion.rs       # YANG <-> SCHC rule conversion
+  samples/
+    m-rules.json        # M-Rules in JSON format
+    m-rules.sor         # M-Rules in SOR (CBOR) format
+    ietf-schc@*.sid     # SID file for YANG mapping
+  rules/
+    base-ipv6-udp.json  # Base rule in JSON
+    base-ipv6-udp.sor   # Base rule in SOR format
+  examples/
+    schc_core.rs        # Network endpoint example
+    schc_device.rs      # IoT device example
+```
+
+## Minimum Supported Rust Version
+
+The MSRV is **1.85** (Rust edition 2024) for the `schc` and `coreconf` subcrates. The root crate uses edition 2021.
+
 ## References
 
-- [draft-toutain-schc-coreconf-management](https://datatracker.ietf.org/doc/draft-toutain-schc-coreconf-management/) - CORECONF Rule management for SCHC
-- [RFC 9363](https://datatracker.ietf.org/doc/rfc9363/) - YANG Data Model for SCHC
-- [RFC 8724](https://datatracker.ietf.org/doc/rfc8724/) - SCHC Framework
-- [draft-ietf-core-comi](https://datatracker.ietf.org/doc/draft-ietf-core-comi/) - CoRECONF
+- [draft-toutain-schc-coreconf-management](https://datatracker.ietf.org/doc/draft-toutain-schc-coreconf-management/) -- CORECONF Rule management for SCHC
+- [RFC 9363](https://datatracker.ietf.org/doc/rfc9363/) -- YANG Data Model for SCHC
+- [RFC 8724](https://datatracker.ietf.org/doc/rfc8724/) -- SCHC Framework
+- [draft-ietf-core-comi](https://datatracker.ietf.org/doc/draft-ietf-core-comi/) -- CoRECONF
 
 ## License
 

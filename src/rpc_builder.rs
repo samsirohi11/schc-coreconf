@@ -441,9 +441,10 @@ pub fn analyze_rpc_overhead(
     let total_rpc_bytes = rpc_bytes.len();
 
     // Calculate CBOR root overhead: { SID_5201: { ... } }
-    // - 1 byte: map with 1 element (0xa1)
-    // - 2 bytes: integer key 5201 (0x19 0x14 0x51)
-    let cbor_root_overhead = 3;
+    // - 1 byte: outer map header (0xa1 = map with 1 element)
+    // - N bytes: integer key 5201 (0x19 0x14 0x51 = 3 bytes for uint16)
+    // - 1 byte: inner map header (0xa4/0xa5 = map with 4-5 elements)
+    let cbor_root_overhead = 1 + cbor_integer_size(SID_DUPLICATE_RULE_INPUT) + 1;
 
     // Calculate rule ID overhead (4 fields with small integer values)
     // Each field: 1 byte delta + 1-2 bytes value
