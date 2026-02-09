@@ -4,11 +4,14 @@
 //! compressing CORECONF management traffic. Only M-Rules can modify the Set
 //! of Rules (SoR), and M-Rules themselves cannot be modified via CORECONF.
 
-use crate::error::{Error, Result};
-use crate::sor_loader::load_sor_rules;
+use std::fs;
+use std::path::Path;
+
 use rust_coreconf::SidFile;
 use schc::rule::{Rule, RuleSet};
-use std::fs;
+
+use crate::error::{Error, Result};
+use crate::sor_loader::load_sor_rules;
 
 /// M-Rule set for CORECONF management traffic
 #[derive(Debug, Clone)]
@@ -21,8 +24,9 @@ pub struct MRuleSet {
 
 impl MRuleSet {
     /// Create M-Rules from a JSON file
-    pub fn from_file(path: &str) -> Result<Self> {
-        let content = fs::read_to_string(path)?;
+    pub fn from_file(path: impl AsRef<Path>) -> Result<Self> {
+        let content = fs::read_to_string(path.as_ref())
+            .map_err(|e| Error::RulesFile(format!("{}: {}", path.as_ref().display(), e)))?;
         Self::from_json(&content)
     }
 
@@ -30,7 +34,7 @@ impl MRuleSet {
     ///
     /// This is the preferred method for production as SOR format uses
     /// SID-based encoding which is more compact than JSON.
-    pub fn from_sor(path: &str, sid_file: &SidFile) -> Result<Self> {
+    pub fn from_sor(path: impl AsRef<Path>, sid_file: &SidFile) -> Result<Self> {
         let rules = load_sor_rules(path, sid_file)?;
 
         if rules.is_empty() {
@@ -93,20 +97,25 @@ impl MRuleSet {
             }
         ]"#;
 
-        Self::from_json(json).expect("Default M-Rules should parse")
+        // SAFETY: This is a hardcoded JSON literal that is always valid.
+        // If this panics, it's a programmer error in the constant above.
+        Self::from_json(json).expect("default M-Rules JSON is valid")
     }
 
     /// Get the reserved Rule ID range for M-Rules
+    #[must_use]
     pub fn reserved_range(&self) -> (u32, u32) {
         self.reserved_range
     }
 
     /// Get the M-Rules as a slice
+    #[must_use]
     pub fn rules(&self) -> &[Rule] {
         &self.rules
     }
 
     /// Check if a rule ID is in the M-Rule reserved range
+    #[must_use]
     pub fn is_m_rule(&self, rule_id: u32) -> bool {
         rule_id >= self.reserved_range.0 && rule_id <= self.reserved_range.1
     }

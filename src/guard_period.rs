@@ -9,6 +9,7 @@
 //! - Rule deletion requires a guard period during which the rule ID is blocked
 
 use std::collections::HashMap;
+use std::fmt;
 use std::time::{Duration, Instant};
 
 /// Rule activation state
@@ -27,6 +28,16 @@ pub enum RuleState {
         /// When the rule should be removed
         expiry_time: Instant,
     },
+}
+
+impl fmt::Display for RuleState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RuleState::Active => write!(f, "active"),
+            RuleState::Candidate { .. } => write!(f, "candidate"),
+            RuleState::Deprecated { .. } => write!(f, "deprecated"),
+        }
+    }
 }
 
 /// Guard period manager for rule activation synchronization
@@ -173,7 +184,7 @@ impl GuardPeriodManager {
     }
 
     /// Get the state of a specific rule
-    pub fn get_state(&self, rule_id: u32, rule_id_length: u8) -> Option<&RuleState> {
+    pub fn state(&self, rule_id: u32, rule_id_length: u8) -> Option<&RuleState> {
         self.rule_states.get(&(rule_id, rule_id_length))
     }
 

@@ -483,10 +483,7 @@ impl SchcCoreconfHandler {
             .unwrap_or(8) as u8;
 
         // Check if the rule exists (modify) or is new (create)
-        let manager = match self.read_manager() {
-            Ok(guard) => guard,
-            Err(e) => return Err(e),
-        };
+        let manager = self.read_manager()?;
         let exists = manager
             .all_rules()
             .iter()

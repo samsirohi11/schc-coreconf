@@ -28,7 +28,7 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
 //! use schc_coreconf::{SchcCoreconfManager, MRuleSet};
 //! use std::time::Duration;
 //!

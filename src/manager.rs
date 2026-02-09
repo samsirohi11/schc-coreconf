@@ -188,6 +188,7 @@ impl SchcCoreconfManager {
     /// # Returns
     /// * `Some((rule_id, rule_id_length))` - Next available rule ID
     /// * `None` - No available rule IDs within MAX_RULE_ID_LENGTH limit
+    #[must_use]
     pub fn find_next_available_rule_id(&self, base_rule: (u32, u8)) -> Option<(u32, u8)> {
         let mut queue: VecDeque<(u32, u8)> = VecDeque::new();
         let mut visited: HashSet<(u32, u8)> = HashSet::new();
@@ -284,9 +285,7 @@ impl SchcCoreconfManager {
             .iter()
             .position(|r| r.rule_id == rule.rule_id && r.rule_id_length == rule.rule_id_length);
 
-        let is_modification = existing_idx.is_some();
-
-        if is_modification {
+        if let Some(idx) = existing_idx {
             // Rule modification - requires guard period per draft
             log::info!(
                 "Modifying rule {}/{} (guard period: {:?})",
@@ -296,7 +295,7 @@ impl SchcCoreconfManager {
             );
             self.guard_period
                 .schedule_activation(rule.rule_id, rule.rule_id_length);
-            self.app_rules[existing_idx.unwrap()] = rule;
+            self.app_rules[idx] = rule;
         } else {
             // New rule creation - immediately active per draft
             // "Rule creation do not require a Guard period"

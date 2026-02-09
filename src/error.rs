@@ -34,11 +34,13 @@ impl CoapCode {
     pub const INTERNAL_SERVER_ERROR: CoapCode = CoapCode(5, 0);
 
     /// Convert to raw CoAP code byte
+    #[must_use]
     pub fn to_byte(self) -> u8 {
         (self.0 << 5) | self.1
     }
 
     /// Check if this is a success code (2.xx)
+    #[must_use]
     pub fn is_success(self) -> bool {
         self.0 == 2
     }
@@ -52,6 +54,7 @@ impl std::fmt::Display for CoapCode {
 
 /// Errors that can occur in schc-coreconf operations
 #[derive(Error, Debug)]
+#[non_exhaustive]
 pub enum Error {
     /// Failed to load or parse SID file
     #[error("SID file error: {0}")]
