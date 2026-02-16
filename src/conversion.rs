@@ -213,6 +213,8 @@ fn yang_entry_to_field(entry: &Value) -> Result<Field> {
     Ok(Field {
         fid,
         fl,
+        fp: None,
+        coap_option_number: None,
         di,
         tv,
         mo,
@@ -466,6 +468,8 @@ mod tests {
             compression: vec![Field {
                 fid: FieldId::Ipv6Ver,
                 fl: Some(4),
+                fp: None,
+                coap_option_number: None,
                 tv: Some(json!(6)),
                 mo: MatchingOperator::Equal,
                 cda: CompressionAction::NotSent,

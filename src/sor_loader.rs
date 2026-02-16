@@ -263,6 +263,8 @@ fn parse_normal_field_entry(
     Ok(Field {
         fid,
         fl,
+        fp: None,
+        coap_option_number: field_id_to_coap_option_num(fid),
         di,
         tv,
         mo,
@@ -318,6 +320,8 @@ fn parse_universal_option_entry(
     Ok(Field {
         fid,
         fl,
+        fp: None,
+        coap_option_number: option_num.map(|n| n as u16),
         di,
         tv,
         mo,
@@ -1194,6 +1198,8 @@ mod tests {
         let field = Field {
             fid: FieldId::CoapUriPath,
             fl: Some(8),
+            fp: None,
+            coap_option_number: Some(11),
             di: None,
             tv: Some(serde_json::Value::String("c".to_string())),
             mo: MatchingOperator::Equal,

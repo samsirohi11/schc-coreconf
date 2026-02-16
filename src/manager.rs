@@ -791,6 +791,8 @@ mod tests {
             compression: vec![Field {
                 fid: FieldId::Ipv6Ver,
                 fl: Some(4),
+                fp: None,
+                coap_option_number: None,
                 tv: Some(serde_json::json!(6)),
                 mo: MatchingOperator::Equal,
                 cda: CompressionAction::NotSent,
@@ -909,6 +911,8 @@ mod tests {
             compression: vec![Field {
                 fid: FieldId::Ipv6AppPrefix,
                 fl: Some(64),
+                fp: None,
+                coap_option_number: None,
                 tv: None,
                 mo: MatchingOperator::Ignore,
                 cda: CompressionAction::ValueSent,

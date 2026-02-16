@@ -278,7 +278,7 @@ impl GuardPeriodManager {
         let now = Instant::now();
         self.blocked_ids
             .iter()
-            .filter(|(_, &expiry)| now < expiry)
+            .filter(|&(_, &expiry)| now < expiry)
             .map(|(&key, _)| key)
             .collect()
     }

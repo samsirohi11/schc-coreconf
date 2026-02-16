@@ -289,7 +289,7 @@ if let Some(rule_id) = manager.allocate_rule_id(base_rule) {
 
 | Format           | Example                                    | Size       |
 | ---------------- | ------------------------------------------ | ---------- |
-| **JSON strings** | `{"input":{"source-rule-id-value":8,...}}`  | ~150 bytes |
+| **JSON strings** | `{"input":{"source-rule-id-value":8,...}}` | ~150 bytes |
 | **SID deltas**   | `{5201:{1:8,2:4,3:8,4:5,...}}`             | ~40 bytes  |
 
 The SID-based encoding provides ~70% size reduction for RPC messages.
@@ -335,7 +335,7 @@ schc-coreconf/
 
 ## Minimum Supported Rust Version
 
-The MSRV is **1.85** (Rust edition 2024) for the `schc` and `coreconf` subcrates. The root crate uses edition 2021.
+The MSRV is **1.85** (Rust edition 2024) for the `schc` and `coreconf` subcrates and the root crate.
 
 ## References
 

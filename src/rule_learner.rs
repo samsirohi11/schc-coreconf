@@ -282,6 +282,8 @@ mod tests {
         Field {
             fid,
             fl: None,
+            fp: None,
+            coap_option_number: None,
             di: None,
             tv: None,
             mo: MatchingOperator::Ignore,

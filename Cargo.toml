@@ -1,7 +1,8 @@
 [package]
 name = "schc-coreconf"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
+rust-version = "1.85"
 description = "CoRECONF-based rule management for SCHC compression"
 license = "MIT"
 repository = "https://github.com/samsirohi11/schc-coreconf"
@@ -49,3 +50,7 @@ path = "examples/schc_device.rs"
 [[example]]
 name = "sor_converter"
 path = "examples/sor_converter.rs"
+
+[[example]]
+name = "derive_implicit"
+path = "examples/derive_implicit.rs"
