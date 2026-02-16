@@ -230,14 +230,10 @@ fn main() -> std::io::Result<()> {
                         println!("  SCHC data: {:02x?}", &data_buf[..len.min(32)]);
                     }
 
-                    // Parse and display IPv6/UDP headers
+                    // Parse and display IPv6/UDP headers + payload if any
                     if decompressed.len() >= 48 {
+                        print!("  {} bytes payload", decompressed.len() - 48);
                         display_ipv6_udp_headers(&decompressed);
-                        
-                        // Extract and display payload (after Ethernet + IPv6 + UDP headers)
-                        if decompressed.len() > 62 {
-                            
-                        }
                     }
                 }
                 Err(e) => {
@@ -278,7 +274,7 @@ fn display_ipv6_udp_headers(data: &[u8]) {
 
     let src_addr: [u8; 16] = data[8..24].try_into().unwrap();
     let dst_addr: [u8; 16] = data[24..40].try_into().unwrap();
-
+    println!("\n  Packet Structure:");
     println!("  IPv6: ver={} tc={} fl={} len={} nxt={} hop={}",
         version, traffic_class, flow_label, payload_len, next_header, hop_limit);
     println!("    src: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
@@ -301,19 +297,20 @@ fn display_ipv6_udp_headers(data: &[u8]) {
         u16::from_be_bytes([dst_addr[14], dst_addr[15]]));
 
     // UDP header (8 bytes starting at offset 40)
+    let src_port = u16::from_be_bytes([data[40], data[41]]);
+    let dst_port = u16::from_be_bytes([data[42], data[43]]);
+    let udp_len = u16::from_be_bytes([data[44], data[45]]);
+    println!("  UDP: src_port={} dst_port={} len={}", src_port, dst_port, udp_len);
+
     if data.len() >= 48 {
-        let src_port = u16::from_be_bytes([data[40], data[41]]);
-        let dst_port = u16::from_be_bytes([data[42], data[43]]);
-        let udp_len = u16::from_be_bytes([data[44], data[45]]);
-        println!("  UDP: src_port={} dst_port={} len={}", src_port, dst_port, udp_len);
+        let payload_bytes = &data[48..];
+        if let Ok(payload_str) = std::str::from_utf8(payload_bytes) {
+            println!("  Payload: \"{}\"", payload_str);
+        } else {
+            println!("  Payload: {:02x?} (non-UTF8)", payload_bytes);
+        }
     }
 
-    let payload_bytes = &data[48..];
-    if let Ok(payload_str) = std::str::from_utf8(payload_bytes) {
-        println!("  Payload: \"{}\"", payload_str);
-    } else {
-        println!("  Payload: {:02x?} (non-UTF8)", payload_bytes);
-    }
 
 }
 

@@ -23,6 +23,9 @@
 //!   # Echo mode (decompress, re-compress, send back):
 //!   cargo run --example udp_tunnel_interop -- --listen 127.0.0.1:9000 --echo --rules rules.sor
 //!
+//!   # Server mode for Docker interop (listen on all interfaces, auto RX direction, DOWN on TX):
+//!   cargo run --example udp_tunnel_interop -- --server --rules rules/test-rule.json -v
+//!
 //! For interop testing:
 //!   1. Have the same rule file on both sides (sor or json)
 //!   2. Run this example in listen or echo mode
@@ -55,6 +58,68 @@ struct Stats {
     tx_compress_fail: AtomicU64,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum DirectionMode {
+    Up,
+    Down,
+    Auto,
+}
+
+fn parse_direction_mode(value: &str) -> io::Result<DirectionMode> {
+    match value.to_ascii_lowercase().as_str() {
+        "up" => Ok(DirectionMode::Up),
+        "down" | "dw" => Ok(DirectionMode::Down),
+        "auto" => Ok(DirectionMode::Auto),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("Invalid direction mode '{}'. Use up, down, or auto", value),
+        )),
+    }
+}
+
+fn parse_direction(value: &str) -> io::Result<Direction> {
+    match value.to_ascii_lowercase().as_str() {
+        "up" => Ok(Direction::Up),
+        "down" | "dw" => Ok(Direction::Down),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("Invalid direction '{}'. Use up or down", value),
+        )),
+    }
+}
+
+fn decompress_with_mode(
+    schc_data: &[u8],
+    rules: &[Rule],
+    mode: DirectionMode,
+) -> Result<(Direction, u32, u8, Vec<u8>), String> {
+    let try_one = |dir: Direction| {
+        decompress_packet(schc_data, rules, dir, None)
+            .map(|d| (dir, d.rule_id, d.rule_id_length, d.full_data))
+            .map_err(|e| format!("{:?}", e))
+    };
+
+    match mode {
+        DirectionMode::Up => try_one(Direction::Up),
+        DirectionMode::Down => try_one(Direction::Down),
+        DirectionMode::Auto => {
+            let up = try_one(Direction::Up);
+            if up.is_ok() {
+                return up;
+            }
+            let down = try_one(Direction::Down);
+            if down.is_ok() {
+                return down;
+            }
+            Err(format!(
+                "AUTO direction failed. up_err={}, down_err={}",
+                up.err().unwrap_or_else(|| "unknown".to_string()),
+                down.err().unwrap_or_else(|| "unknown".to_string())
+            ))
+        }
+    }
+}
+
 impl Stats {
     fn print(&self) {
         println!("\n=== Statistics ===");
@@ -74,11 +139,25 @@ fn main() -> io::Result<()> {
 
     let args: Vec<String> = std::env::args().collect();
 
+    let server_mode = args.iter().any(|a| a == "--server");
+
     let listen_addr = args.iter().position(|a| a == "--listen")
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str());
 
+    let listen_addr = if listen_addr.is_some() {
+        listen_addr
+    } else if server_mode {
+        Some("0.0.0.0:8888")
+    } else {
+        None
+    };
+
     let send_addr = args.iter().position(|a| a == "--send")
+        .and_then(|i| args.get(i + 1))
+        .map(|s| s.as_str());
+
+    let reply_to = args.iter().position(|a| a == "--reply-to")
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str());
 
@@ -88,7 +167,27 @@ fn main() -> io::Result<()> {
         .unwrap_or("rules/base-ipv6-udp.sor");
 
     let verbose = args.iter().any(|a| a == "-v" || a == "--verbose");
-    let echo_mode = args.iter().any(|a| a == "--echo");
+    let echo_mode = args.iter().any(|a| a == "--echo") || server_mode;
+
+    let rx_direction_mode = args
+        .iter()
+        .position(|a| a == "--rx-direction")
+        .and_then(|i| args.get(i + 1))
+        .map(|s| parse_direction_mode(s))
+        .transpose()?
+        .unwrap_or(if server_mode {
+            DirectionMode::Auto
+        } else {
+            DirectionMode::Up
+        });
+
+    let tx_direction = args
+        .iter()
+        .position(|a| a == "--tx-direction")
+        .and_then(|i| args.get(i + 1))
+        .map(|s| parse_direction(s))
+        .transpose()?
+        .unwrap_or(if server_mode { Direction::Down } else { Direction::Up });
 
     if listen_addr.is_none() && send_addr.is_none() {
         print_usage();
@@ -98,6 +197,19 @@ fn main() -> io::Result<()> {
     println!("============================================================");
     println!("       SCHC UDP Tunnel - Interoperability Testing");
     println!("============================================================\n");
+
+    if server_mode {
+        println!("Mode: SERVER (Docker interop)");
+        println!("  listen: {}", listen_addr.unwrap_or("0.0.0.0:8888"));
+        println!("  rx-direction: {:?}", rx_direction_mode);
+        println!("  tx-direction: {:?}", tx_direction);
+        if let Some(dst) = reply_to {
+            println!("  reply-to: {}", dst);
+        } else {
+            println!("  reply-to: source sender");
+        }
+        println!();
+    }
 
     // Load rules (auto-detect format)
     let rules = load_rules(rules_path)?;
@@ -130,19 +242,38 @@ fn main() -> io::Result<()> {
     match (listen_addr, send_addr, echo_mode) {
         // Echo mode: listen and echo back compressed packets
         (Some(addr), _, true) => {
-            run_echo_mode(addr, &ruleset, &tree, &stats, verbose)?;
+            run_echo_mode(
+                addr,
+                reply_to,
+                &ruleset,
+                &tree,
+                &stats,
+                verbose,
+                rx_direction_mode,
+                tx_direction,
+            )?;
         }
         // Bidirectional mode: both listen and send
         (Some(listen), Some(send), false) => {
-            run_bidirectional(listen, send, &ruleset, &tree, &stats, &running, verbose)?;
+            run_bidirectional(
+                listen,
+                send,
+                &ruleset,
+                &tree,
+                &stats,
+                &running,
+                verbose,
+                rx_direction_mode,
+                tx_direction,
+            )?;
         }
         // Receive only
         (Some(addr), None, false) => {
-            run_receiver(addr, &ruleset, &stats, verbose)?;
+            run_receiver(addr, &ruleset, &stats, verbose, rx_direction_mode)?;
         }
         // Send only
         (None, Some(addr), false) => {
-            run_sender(addr, &ruleset, &tree, &stats, verbose)?;
+            run_sender(addr, &ruleset, &tree, &stats, verbose, tx_direction)?;
         }
         _ => {
             print_usage();
@@ -160,6 +291,10 @@ fn print_usage() {
     println!("  --send <addr:port>    Send SCHC packets to address");
     println!("  --rules <path>        Path to rules file (SOR or JSON)");
     println!("  --echo                Echo mode: decompress and send back re-compressed");
+    println!("  --server              Server mode for Docker interop (equivalent to --listen 0.0.0.0:8888 --echo)");
+    println!("  --reply-to <addr:port> Send echoed packets to this address instead of source");
+    println!("  --rx-direction <up|down|auto>  Direction used to decompress incoming SCHC");
+    println!("  --tx-direction <up|down>       Direction used when compressing outbound SCHC");
     println!("  -v, --verbose         Verbose output\n");
     println!("Examples:");
     println!("  # Receiver mode:");
@@ -170,6 +305,9 @@ fn print_usage() {
     println!();
     println!("  # Echo mode (for testing round-trip):");
     println!("  cargo run --example udp_tunnel_interop -- --listen 127.0.0.1:9000 --echo --rules rules.sor");
+    println!();
+    println!("  # Server mode for Docker interop with test-rule.json:");
+    println!("  cargo run --example udp_tunnel_interop -- --server --rules rules/test-rule.json --rx-direction auto --tx-direction down -v");
     println!();
     println!("  # Bidirectional mode:");
     println!("  cargo run --example udp_tunnel_interop -- --listen 127.0.0.1:9000 --send 127.0.0.1:9001 --rules rules.sor");
@@ -190,7 +328,13 @@ fn load_rules(path: &str) -> io::Result<Vec<Rule>> {
     }
 }
 
-fn run_receiver(addr: &str, ruleset: &RuleSet, stats: &Stats, verbose: bool) -> io::Result<()> {
+fn run_receiver(
+    addr: &str,
+    ruleset: &RuleSet,
+    stats: &Stats,
+    verbose: bool,
+    rx_direction_mode: DirectionMode,
+) -> io::Result<()> {
     let socket = UdpSocket::bind(addr)?;
     socket.set_read_timeout(Some(Duration::from_secs(30)))?;
 
@@ -211,18 +355,21 @@ fn run_receiver(addr: &str, ruleset: &RuleSet, stats: &Stats, verbose: bool) -> 
                     println!("  SCHC: {}", hex::encode(schc_data));
                 }
 
-                match decompress_packet(schc_data, &ruleset.rules, Direction::Up, None) {
-                    Ok(decompressed) => {
+                match decompress_with_mode(schc_data, &ruleset.rules, rx_direction_mode) {
+                    Ok((used_direction, rule_id, rule_id_length, full_data)) => {
                         stats.rx_decompress_ok.fetch_add(1, Ordering::Relaxed);
-                        println!("  Decompressed: {} bytes (Rule {}/{})",
-                                 decompressed.full_data.len(),
-                                 decompressed.rule_id,
-                                 decompressed.rule_id_length);
-                        display_ipv6_udp(&decompressed.full_data);
+                        println!(
+                            "  Decompressed: {} bytes (Rule {}/{}, Direction={:?})",
+                            full_data.len(),
+                            rule_id,
+                            rule_id_length,
+                            used_direction
+                        );
+                        display_ipv6_udp(&full_data);
                     }
                     Err(e) => {
                         stats.rx_decompress_fail.fetch_add(1, Ordering::Relaxed);
-                        println!("  Decompress error: {:?}", e);
+                        println!("  Decompress error: {}", e);
                     }
                 }
                 println!();
@@ -238,7 +385,14 @@ fn run_receiver(addr: &str, ruleset: &RuleSet, stats: &Stats, verbose: bool) -> 
     }
 }
 
-fn run_sender(addr: &str, ruleset: &RuleSet, tree: &TreeNode, stats: &Stats, verbose: bool) -> io::Result<()> {
+fn run_sender(
+    addr: &str,
+    ruleset: &RuleSet,
+    tree: &TreeNode,
+    stats: &Stats,
+    verbose: bool,
+    tx_direction: Direction,
+) -> io::Result<()> {
     let socket = UdpSocket::bind("0.0.0.0:0")?;
     socket.connect(addr)?;
 
@@ -264,7 +418,7 @@ fn run_sender(addr: &str, ruleset: &RuleSet, tree: &TreeNode, stats: &Stats, ver
         match parts[0] {
             "send" => {
                 let count: usize = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(1);
-                send_test_packets(&socket, ruleset, tree, stats, count, verbose)?;
+                send_test_packets(&socket, ruleset, tree, stats, count, verbose, tx_direction)?;
             }
             "stats" => stats.print(),
             "quit" | "exit" | "q" => {
@@ -278,12 +432,38 @@ fn run_sender(addr: &str, ruleset: &RuleSet, tree: &TreeNode, stats: &Stats, ver
     Ok(())
 }
 
-fn run_echo_mode(addr: &str, ruleset: &RuleSet, tree: &TreeNode, stats: &Stats, verbose: bool) -> io::Result<()> {
+fn run_echo_mode(
+    addr: &str,
+    reply_to: Option<&str>,
+    ruleset: &RuleSet,
+    tree: &TreeNode,
+    stats: &Stats,
+    verbose: bool,
+    rx_direction_mode: DirectionMode,
+    tx_direction: Direction,
+) -> io::Result<()> {
     let socket = UdpSocket::bind(addr)?;
     socket.set_read_timeout(Some(Duration::from_secs(30)))?;
 
-    println!("Echo mode: listening on {}", addr);
+    let fixed_reply_target: Option<SocketAddr> = match reply_to {
+        Some(dst) => Some(dst.parse().map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("Invalid --reply-to address '{}': {}", dst, e),
+            )
+        })?),
+        None => None,
+    };
+
+    println!("Echo/server mode: listening on {}", addr);
     println!("Will decompress, re-compress, and send back to sender.");
+    println!("RX direction mode: {:?}", rx_direction_mode);
+    println!("TX direction: {:?}", tx_direction);
+    if let Some(dst) = fixed_reply_target {
+        println!("Reply target: {}", dst);
+    } else {
+        println!("Reply target: source sender");
+    }
     println!("Press Ctrl+C to stop\n");
 
     let mut buf = [0u8; 2048];
@@ -298,21 +478,24 @@ fn run_echo_mode(addr: &str, ruleset: &RuleSet, tree: &TreeNode, stats: &Stats, 
                 println!("[{}] Received {} bytes from {}", count, len, src);
 
                 // Decompress
-                match decompress_packet(schc_data, &ruleset.rules, Direction::Up, None) {
-                    Ok(decompressed) => {
+                match decompress_with_mode(schc_data, &ruleset.rules, rx_direction_mode) {
+                    Ok((used_direction, rule_id, rule_id_length, full_data)) => {
                         stats.rx_decompress_ok.fetch_add(1, Ordering::Relaxed);
-                        println!("  Decompressed: {} bytes (rule {}/{})", 
-                            decompressed.full_data.len(),
-                            decompressed.rule_id,
-                            decompressed.rule_id_length);
+                        println!(
+                            "  Decompressed: {} bytes (rule {}/{}, Direction={:?})",
+                            full_data.len(),
+                            rule_id,
+                            rule_id_length,
+                            used_direction
+                        );
 
-                        display_ipv6_udp(&decompressed.full_data);
+                        display_ipv6_udp(&full_data);
 
-                        // Re-compress with same direction (for interop testing we don't swap addresses)
+                        // Re-compress using explicit TX direction for true server/device interoperability
                         match compress_packet_with_link_layer(
                             tree,
-                            &decompressed.full_data,
-                            Direction::Up,  // Use same direction since addresses aren't swapped
+                            &full_data,
+                            tx_direction,
                             &ruleset.rules,
                             verbose,
                             LinkLayer::None,
@@ -321,11 +504,16 @@ fn run_echo_mode(addr: &str, ruleset: &RuleSet, tree: &TreeNode, stats: &Stats, 
                                 stats.tx_compress_ok.fetch_add(1, Ordering::Relaxed);
                                 stats.tx_packets.fetch_add(1, Ordering::Relaxed);
 
-                                socket.send_to(&compressed.data, src)?;
-                                println!("  Echo sent: {} bytes to {} (rule {}/{})", 
-                                    compressed.data.len(), src,
+                                let target = fixed_reply_target.unwrap_or(src);
+                                socket.send_to(&compressed.data, target)?;
+                                println!(
+                                    "  Echo sent: {} bytes to {} (rule {}/{}, Direction={:?})",
+                                    compressed.data.len(),
+                                    target,
                                     compressed.rule_id,
-                                    compressed.rule_id_length);
+                                    compressed.rule_id_length,
+                                    tx_direction
+                                );
                             }
                             Err(e) => {
                                 stats.tx_compress_fail.fetch_add(1, Ordering::Relaxed);
@@ -335,7 +523,7 @@ fn run_echo_mode(addr: &str, ruleset: &RuleSet, tree: &TreeNode, stats: &Stats, 
                     }
                     Err(e) => {
                         stats.rx_decompress_fail.fetch_add(1, Ordering::Relaxed);
-                        println!("  Decompress error: {:?}", e);
+                        println!("  Decompress error: {}", e);
                     }
                 }
                 println!();
@@ -359,6 +547,8 @@ fn run_bidirectional(
     stats: &Arc<Stats>,
     running: &Arc<AtomicBool>,
     verbose: bool,
+    rx_direction_mode: DirectionMode,
+    tx_direction: Direction,
 ) -> io::Result<()> {
     let socket = UdpSocket::bind(listen_addr)?;
     socket.set_read_timeout(Some(Duration::from_millis(100)))?;
@@ -387,9 +577,17 @@ fn run_bidirectional(
                     let schc_data = &buf[..len];
 
                     println!("\n[RX {}] {} bytes from {}", count, len, src);
-                    if let Ok(d) = decompress_packet(schc_data, &ruleset_clone.rules, Direction::Up, None) {
+                    if let Ok((used_direction, rule_id, rule_id_length, full_data)) =
+                        decompress_with_mode(schc_data, &ruleset_clone.rules, rx_direction_mode)
+                    {
                         stats_clone.rx_decompress_ok.fetch_add(1, Ordering::Relaxed);
-                        println!("  Decompressed: {} bytes (Rule {}/{})", d.full_data.len(), d.rule_id, d.rule_id_length);
+                        println!(
+                            "  Decompressed: {} bytes (Rule {}/{}, Direction={:?})",
+                            full_data.len(),
+                            rule_id,
+                            rule_id_length,
+                            used_direction
+                        );
                     } else {
                         stats_clone.rx_decompress_fail.fetch_add(1, Ordering::Relaxed);
                         println!("  Decompress failed");
@@ -425,7 +623,12 @@ fn run_bidirectional(
                 for _ in 0..count {
                     let packet = build_test_ipv6_udp_packet("bidirectional test");
                     if let Ok(compressed) = compress_packet_with_link_layer(
-                        tree, &packet, Direction::Up, &ruleset.rules, verbose, LinkLayer::None,
+                        tree,
+                        &packet,
+                        tx_direction,
+                        &ruleset.rules,
+                        verbose,
+                        LinkLayer::None,
                     ) {
                         stats.tx_compress_ok.fetch_add(1, Ordering::Relaxed);
                         stats.tx_packets.fetch_add(1, Ordering::Relaxed);
@@ -456,6 +659,7 @@ fn send_test_packets(
     stats: &Stats,
     count: usize,
     verbose: bool,
+    tx_direction: Direction,
 ) -> io::Result<()> {
     for i in 0..count {
         let payload = format!("Test packet #{}", stats.tx_packets.load(Ordering::Relaxed) + 1);
@@ -465,7 +669,14 @@ fn send_test_packets(
             println!("[{}] IPv6/UDP: {} bytes", i + 1, packet.len());
         }
 
-        match compress_packet_with_link_layer(tree, &packet, Direction::Up, &ruleset.rules, verbose, LinkLayer::None) {
+        match compress_packet_with_link_layer(
+            tree,
+            &packet,
+            tx_direction,
+            &ruleset.rules,
+            verbose,
+            LinkLayer::None,
+        ) {
             Ok(compressed) => {
                 stats.tx_compress_ok.fetch_add(1, Ordering::Relaxed);
                 stats.tx_packets.fetch_add(1, Ordering::Relaxed);

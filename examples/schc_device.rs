@@ -211,13 +211,17 @@ impl DeviceState {
                     let marker = if is_derived { " (DERIVED)" } else { "" };
 
                     println!(
-                        "[Packet {}] Rule {}/{}{}: {} bytes -> {} bytes ({:.1}% compression)",
+                        "[Packet {}] Rule {}/{}{}",
                         i + 1,
                         compressed.rule_id,
                         compressed.rule_id_length,
                         marker,
-                        packet.len() - 14 - payload.len(),
-                        compressed.data.len() - payload.len(),
+                    );
+                       println!(
+                        "{} (header) + {} (payload) bytes -> {}  bytes ({:.1}% header compression)",
+                        packet.len() - 14,
+                        payload.len(),
+                        compressed.data.len(),
                         (1.0 - (compressed.data.len() - payload.len()) as f64
                             / (packet.len() - 14 - payload.len()) as f64)
                             * 100.0
