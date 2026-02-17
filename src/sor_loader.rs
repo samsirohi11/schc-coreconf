@@ -431,7 +431,7 @@ fn cbor_to_json_tv(tv_value: &CborValue) -> Option<serde_json::Value> {
             if values.is_empty() {
                 None
             } else if values.len() == 1 {
-                Some(values.into_iter().next().unwrap())
+                values.into_iter().next()
             } else {
                 Some(serde_json::Value::Array(values))
             }
@@ -1250,7 +1250,7 @@ mod tests {
     }
 
     fn create_test_sid_file() -> SidFile {
-        SidFile::from_str(
+        SidFile::from_json_str(
             r#"{
             "module-name": "ietf-schc",
             "module-revision": "2026-01-12",

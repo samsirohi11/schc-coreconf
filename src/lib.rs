@@ -33,7 +33,7 @@
 //! use std::time::Duration;
 //!
 //! // Load M-Rules and create manager
-//! let m_rules = MRuleSet::from_file("samples/m-rules.json").unwrap();
+//! let m_rules = MRuleSet::from_file("samples/m-rules.json")?;
 //! let mut manager = SchcCoreconfManager::new(
 //!     m_rules,
 //!     vec![],  // No initial app rules
@@ -44,11 +44,12 @@
 //! manager.enable_learning(50);  // Learn after 50 packets
 //!
 //! // Get combined ruleset (M-Rules + active app rules) for compression
-//! let ruleset = manager.compression_ruleset().unwrap();
+//! let _ruleset = manager.compression_ruleset()?;
 //!
 //! // Duplicate a rule using binary tree derivation
 //! // Rule 8/4 can be derived to 8/5 (append 0) or 24/5 (append 1)
-//! manager.duplicate_rule((8, 4), (8, 5), None).unwrap();
+//! manager.duplicate_rule((8, 4), (8, 5), None)?;
+//! # Ok::<(), schc_coreconf::Error>(())
 //! ```
 
 mod conversion;

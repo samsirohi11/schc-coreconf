@@ -18,7 +18,6 @@ Thumbs.db
 # Debug
 *.pdb
 
-implementation_differences.md
-CLAUDE.md
 AGENTS.md
 interop_report.md
+.copilot_refs/

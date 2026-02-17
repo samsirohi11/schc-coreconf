@@ -455,21 +455,12 @@ pub fn analyze_rpc_overhead(
     let rule_id_overhead = measure_rule_id_fields(source, target);
 
     // Calculate modifications array overhead
-    let mods_array_overhead = if modifications.is_some() && !modifications.unwrap().is_empty() {
+    let mods_array_overhead = match modifications {
         // delta 5 (1 byte) + array header (1-2 bytes depending on count)
-        // let count = modifications.unwrap().len();
-        if let Some(mods) = modifications {
-            let count = mods.len();
-            if count < 24 {
-                2
-            } else {
-                3
-            }
-        } else {
-            0
+        Some(mods) if !mods.is_empty() => {
+            if mods.len() < 24 { 2 } else { 3 }
         }
-    } else {
-        0
+        _ => 0,
     };
 
     // Calculate per-modification overhead
