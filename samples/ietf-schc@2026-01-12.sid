@@ -786,6 +786,53 @@
             "status": "unstable",
             "sid": 2652,
             "type": "uint16"
+        },
+        {
+            "namespace": "rpc",
+            "identifier": "/ietf-schc:rmd",
+            "status": "unstable",
+            "sid": 2710
+        },
+        {
+            "namespace": "data",
+            "identifier": "/ietf-schc:rmd/input",
+            "status": "unstable",
+            "sid": 2711
+        },
+        {
+            "namespace": "data",
+            "identifier": "/ietf-schc:rmd/input/from-rule-id-value",
+            "status": "unstable",
+            "sid": 2712,
+            "type": "uint32"
+        },
+        {
+            "namespace": "data",
+            "identifier": "/ietf-schc:rmd/input/from-rule-id-length",
+            "status": "unstable",
+            "sid": 2713,
+            "type": "uint8"
+        },
+        {
+            "namespace": "data",
+            "identifier": "/ietf-schc:rmd/input/to-rule-id-value",
+            "status": "unstable",
+            "sid": 2714,
+            "type": "uint32"
+        },
+        {
+            "namespace": "data",
+            "identifier": "/ietf-schc:rmd/input/to-rule-id-length",
+            "status": "unstable",
+            "sid": 2715,
+            "type": "uint8"
+        },
+        {
+            "namespace": "data",
+            "identifier": "/ietf-schc:rmd/input/packed-instruction-stream",
+            "status": "unstable",
+            "sid": 2716,
+            "type": "binary"
         }
     ],
     "key-mapping": {

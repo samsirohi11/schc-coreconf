@@ -1689,6 +1689,61 @@ module ietf-schc {
                 Compression and Fragmentation";
   }
 
+  rpc rmd {
+    if-feature "compression";
+    description
+      "Derive a new compression Rule from an existing Rule using
+       compact entry selection and packed values.
+
+       Input format:
+       - from-rule (value + length)
+       - to-rule (value + length)
+       - packed instruction stream
+
+      The field lengths are obtained from the source Rule entries,
+      so values are packed bit-by-bit without per-value wrappers.
+
+       This minimizes RPC overhead compared to sending full duplicate
+       entry modifications or a compressed packet payload.";
+
+    input {
+      leaf from-rule-id-value {
+        type uint32;
+        mandatory true;
+        description
+          "Source RuleID value.";
+      }
+      leaf from-rule-id-length {
+        type uint8 {
+          range "0..32";
+        }
+        mandatory true;
+        description
+          "Source RuleID length in bits.";
+      }
+      leaf to-rule-id-value {
+        type uint32;
+        mandatory true;
+        description
+          "Target RuleID value.";
+      }
+      leaf to-rule-id-length {
+        type uint8 {
+          range "0..32";
+        }
+        mandatory true;
+        description
+          "Target RuleID length in bits.";
+      }
+      leaf packed-values {
+        type binary;
+        mandatory true;
+        description
+          "Packed instruction values bitstream.";
+      }
+    }
+  }
+
   // SCHC table for a specific device.
 
   container schc {

@@ -21,3 +21,5 @@ Thumbs.db
 AGENTS.md
 interop_report.md
 .copilot_refs/
+examples/rmd.md
+examples/rmd.rs

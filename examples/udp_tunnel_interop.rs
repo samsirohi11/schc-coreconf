@@ -26,13 +26,16 @@
 //!   # Server mode for Docker interop (listen on all interfaces, auto RX direction, DOWN on TX):
 //!   cargo run --example udp_tunnel_interop -- --server --rules rules/test-rule.json -v
 //!
+//!   # Core proxy mode (decompress, forward to CoAP server, recompress response):
+//!   cargo run --example udp_tunnel_interop -- --server --coap-server user.plido.net:5683 --rules rules/test-rule.json -v
+//!
 //! For interop testing:
 //!   1. Have the same rule file on both sides (sor or json)
 //!   2. Run this example in listen or echo mode
 //!   3. Configure the other implementation to send to this example's listen address    
 
 use std::io::{self, Write};
-use std::net::{SocketAddr, UdpSocket};
+use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -141,14 +144,20 @@ fn main() -> io::Result<()> {
 
     let server_mode = args.iter().any(|a| a == "--server");
 
+    let schc_listen_addr = args.iter().position(|a| a == "--schc-listen")
+        .and_then(|i| args.get(i + 1))
+        .map(|s| s.as_str());
+
     let listen_addr = args.iter().position(|a| a == "--listen")
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str());
 
+    let listen_addr = schc_listen_addr.or(listen_addr);
+
     let listen_addr = if listen_addr.is_some() {
         listen_addr
     } else if server_mode {
-        Some("0.0.0.0:8888")
+        Some("0.0.0.0:23628")
     } else {
         None
     };
@@ -158,6 +167,15 @@ fn main() -> io::Result<()> {
         .map(|s| s.as_str());
 
     let reply_to = args.iter().position(|a| a == "--reply-to")
+        .and_then(|i| args.get(i + 1))
+        .map(|s| s.as_str());
+
+    let downlink_target = args.iter().position(|a| a == "--downlink-target")
+        .and_then(|i| args.get(i + 1))
+        .map(|s| s.as_str());
+    let reply_to = downlink_target.or(reply_to);
+
+    let coap_server = args.iter().position(|a| a == "--coap-server")
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str());
 
@@ -200,13 +218,16 @@ fn main() -> io::Result<()> {
 
     if server_mode {
         println!("Mode: SERVER (Docker interop)");
-        println!("  listen: {}", listen_addr.unwrap_or("0.0.0.0:8888"));
+        println!("  listen: {}", listen_addr.unwrap_or("0.0.0.0:23628"));
         println!("  rx-direction: {:?}", rx_direction_mode);
         println!("  tx-direction: {:?}", tx_direction);
+        if let Some(coap) = coap_server {
+            println!("  coap-server: {}", coap);
+        }
         if let Some(dst) = reply_to {
-            println!("  reply-to: {}", dst);
+            println!("  downlink-target: {}", dst);
         } else {
-            println!("  reply-to: source sender");
+            println!("  downlink-target: source sender");
         }
         println!();
     }
@@ -251,6 +272,7 @@ fn main() -> io::Result<()> {
                 verbose,
                 rx_direction_mode,
                 tx_direction,
+                coap_server,
             )?;
         }
         // Bidirectional mode: both listen and send
@@ -288,11 +310,14 @@ fn print_usage() {
     println!("SCHC UDP Tunnel - Interoperability Testing\n");
     println!("Usage:");
     println!("  --listen <addr:port>  Listen for incoming SCHC packets");
+    println!("  --schc-listen <addr:port> Alias for --listen");
     println!("  --send <addr:port>    Send SCHC packets to address");
     println!("  --rules <path>        Path to rules file (SOR or JSON)");
     println!("  --echo                Echo mode: decompress and send back re-compressed");
-    println!("  --server              Server mode for Docker interop (equivalent to --listen 0.0.0.0:8888 --echo)");
+    println!("  --server              Server mode for Docker interop (equivalent to --listen 0.0.0.0:23628 --echo)");
+    println!("  --coap-server <host:port> Forward decompressed CoAP and recompress response");
     println!("  --reply-to <addr:port> Send echoed packets to this address instead of source");
+    println!("  --downlink-target <addr:port> Alias for --reply-to");
     println!("  --rx-direction <up|down|auto>  Direction used to decompress incoming SCHC");
     println!("  --tx-direction <up|down>       Direction used when compressing outbound SCHC");
     println!("  -v, --verbose         Verbose output\n");
@@ -309,8 +334,26 @@ fn print_usage() {
     println!("  # Server mode for Docker interop with test-rule.json:");
     println!("  cargo run --example udp_tunnel_interop -- --server --rules rules/test-rule.json --rx-direction auto --tx-direction down -v");
     println!();
+    println!("  # Server + CoAP proxy mode:");
+    println!("  cargo run --example udp_tunnel_interop -- --server --coap-server user.plido.net:5683 --rules rules/test-rule.json -v");
+    println!();
     println!("  # Bidirectional mode:");
     println!("  cargo run --example udp_tunnel_interop -- --listen 127.0.0.1:9000 --send 127.0.0.1:9001 --rules rules.sor");
+}
+
+fn resolve_socket_addr(addr: &str, arg_name: &str) -> io::Result<SocketAddr> {
+    let mut addrs = addr.to_socket_addrs().map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("Invalid {} '{}': {}", arg_name, addr, e),
+        )
+    })?;
+    addrs.next().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{} '{}' resolved to no socket address", arg_name, addr),
+        )
+    })
 }
 
 fn load_rules(path: &str) -> io::Result<Vec<Rule>> {
@@ -441,22 +484,33 @@ fn run_echo_mode(
     verbose: bool,
     rx_direction_mode: DirectionMode,
     tx_direction: Direction,
+    coap_server: Option<&str>,
 ) -> io::Result<()> {
     let socket = UdpSocket::bind(addr)?;
     socket.set_read_timeout(Some(Duration::from_secs(30)))?;
 
     let fixed_reply_target: Option<SocketAddr> = match reply_to {
-        Some(dst) => Some(dst.parse().map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("Invalid --reply-to address '{}': {}", dst, e),
-            )
-        })?),
+        Some(dst) => Some(resolve_socket_addr(dst, "--reply-to/--downlink-target")?),
         None => None,
     };
+    let coap_target = match coap_server {
+        Some(dst) => Some(resolve_socket_addr(dst, "--coap-server")?),
+        None => None,
+    };
+    let coap_socket = if coap_target.is_some() {
+        let s = UdpSocket::bind("0.0.0.0:0")?;
+        s.set_read_timeout(Some(Duration::from_secs(5)))?;
+        Some(s)
+    } else {
+        None
+    };
 
-    println!("Echo/server mode: listening on {}", addr);
-    println!("Will decompress, re-compress, and send back to sender.");
+    println!("Echo/server mode listening on {}", addr);
+    if let Some(target) = coap_target {
+        println!("Will decompress, proxy CoAP to {}, and send compressed response.", target);
+    } else {
+        println!("Will decompress, re-compress, and send back to sender.");
+    }
     println!("RX direction mode: {:?}", rx_direction_mode);
     println!("TX direction: {:?}", tx_direction);
     if let Some(dst) = fixed_reply_target {
@@ -491,10 +545,31 @@ fn run_echo_mode(
 
                         display_ipv6_udp(&full_data);
 
+                        let tx_packet = if let Some(target) = coap_target {
+                            let Some(coap_sock) = coap_socket.as_ref() else {
+                                stats.tx_compress_fail.fetch_add(1, Ordering::Relaxed);
+                                println!("  CoAP socket unavailable");
+                                println!();
+                                continue;
+                            };
+
+                            match forward_to_coap_and_build_response(&full_data, coap_sock, target) {
+                                Ok(packet) => packet,
+                                Err(e) => {
+                                    stats.tx_compress_fail.fetch_add(1, Ordering::Relaxed);
+                                    println!("  CoAP proxy error: {}", e);
+                                    println!();
+                                    continue;
+                                }
+                            }
+                        } else {
+                            full_data
+                        };
+
                         // Re-compress using explicit TX direction for true server/device interoperability
                         match compress_packet_with_link_layer(
                             tree,
-                            &full_data,
+                            &tx_packet,
                             tx_direction,
                             &ruleset.rules,
                             verbose,
@@ -537,6 +612,60 @@ fn run_echo_mode(
             }
         }
     }
+}
+
+fn forward_to_coap_and_build_response(
+    ipv6_udp_packet: &[u8],
+    coap_socket: &UdpSocket,
+    coap_target: SocketAddr,
+) -> io::Result<Vec<u8>> {
+    if ipv6_udp_packet.len() < 48 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Decompressed packet too short for IPv6/UDP: {} bytes", ipv6_udp_packet.len()),
+        ));
+    }
+
+    let request_coap = &ipv6_udp_packet[48..];
+    coap_socket.send_to(request_coap, coap_target)?;
+    println!("  CoAP forwarded: {} bytes to {}", request_coap.len(), coap_target);
+
+    let mut response_buf = [0u8; 2048];
+    let (resp_len, resp_src) = coap_socket.recv_from(&mut response_buf)?;
+    println!("  CoAP response: {} bytes from {}", resp_len, resp_src);
+
+    build_ipv6_udp_response(ipv6_udp_packet, &response_buf[..resp_len])
+}
+
+fn build_ipv6_udp_response(request_packet: &[u8], coap_response: &[u8]) -> io::Result<Vec<u8>> {
+    if request_packet.len() < 48 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Request packet too short for IPv6/UDP: {} bytes", request_packet.len()),
+        ));
+    }
+
+    let mut response = Vec::with_capacity(40 + 8 + coap_response.len());
+
+    response.extend_from_slice(&request_packet[0..4]); // Version/TC/FL
+
+    let payload_length = (8 + coap_response.len()) as u16;
+    response.extend_from_slice(&payload_length.to_be_bytes());
+    response.push(request_packet[6]); // Next Header
+    response.push(request_packet[7]); // Hop Limit
+
+    // Swap source/destination IPv6 addresses.
+    response.extend_from_slice(&request_packet[24..40]); // source = previous destination
+    response.extend_from_slice(&request_packet[8..24]);  // destination = previous source
+
+    // Swap UDP ports.
+    response.extend_from_slice(&request_packet[42..44]); // src port = previous dst port
+    response.extend_from_slice(&request_packet[40..42]); // dst port = previous src port
+    response.extend_from_slice(&payload_length.to_be_bytes());
+    response.extend_from_slice(&[0x00, 0x00]); // checksum left to compute-CDA/rule behavior
+
+    response.extend_from_slice(coap_response);
+    Ok(response)
 }
 
 fn run_bidirectional(

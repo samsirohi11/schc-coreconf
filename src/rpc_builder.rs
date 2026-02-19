@@ -307,7 +307,7 @@ pub struct RpcOverheadAnalysis {
     pub modification_overheads: Vec<ModificationOverhead>,
     /// Total fixed overhead (cbor_root + rule_id + mods_array)
     pub total_fixed_overhead: usize,
-    /// Total per-field overhead (sum of all modifications)
+    /// Total per-field overhead (sum of modification overhead bytes)
     pub total_per_field_overhead: usize,
     /// Average per-field overhead
     pub avg_per_field_overhead: f64,
@@ -469,7 +469,7 @@ pub fn analyze_rpc_overhead(
         .unwrap_or_default();
 
     let total_per_field_overhead: usize =
-        modification_overheads.iter().map(|m| m.total_bytes).sum();
+        modification_overheads.iter().map(|m| m.overhead_bytes).sum();
     let avg_per_field_overhead = if modification_overheads.is_empty() {
         0.0
     } else {

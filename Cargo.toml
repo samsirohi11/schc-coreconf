@@ -52,5 +52,5 @@ name = "sor_converter"
 path = "examples/sor_converter.rs"
 
 [[example]]
-name = "derive_implicit"
-path = "examples/derive_implicit.rs"
+name = "rmd"
+path = "examples/rmd.rs"
