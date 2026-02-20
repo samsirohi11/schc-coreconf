@@ -7,7 +7,7 @@
 //!
 //! New flow only (legacy flags removed).
 //! Usage:
-//!   cargo run --example udp_tunnel_interop -- --position core --schc-listen 0.0.0.0:23628 --plain-listen 0.0.0.0:23629 --plain-peer 127.0.0.1:5683 --rules rules/docker1.sor -v
+//!   cargo run --example udp_tunnel_interop -- --position core --schc-listen 0.0.0.0:23628 --plain-listen 0.0.0.0:23629 --plain-peer 127.0.0.1:5683  --plain-mode coap --rules rules/docker1.sor -v
 
 use std::io;
 use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
@@ -32,6 +32,12 @@ enum DirectionMode {
     Up,
     Down,
     Auto,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum PlainMode {
+    Coap,
+    Ipv6,
 }
 
 #[derive(Default)]
@@ -95,6 +101,10 @@ fn main() -> io::Result<()> {
 
     let schc_peer = arg_value(&args, "--schc-peer");
     let rules_path = arg_value(&args, "--rules").unwrap_or_else(|| "rules/base-ipv6-udp.sor".to_string());
+    let plain_mode = arg_value(&args, "--plain-mode")
+        .map(|s| parse_plain_mode(&s))
+        .transpose()?
+        .unwrap_or(PlainMode::Coap);
     let verbose = args.iter().any(|a| a == "-v" || a == "--verbose");
 
     let rx_default = match position {
@@ -127,6 +137,7 @@ fn main() -> io::Result<()> {
     }
     println!("Plain listen: {}", plain_listen);
     println!("Plain peer: {}", plain_peer);
+    println!("Plain mode: {:?}", plain_mode);
     println!("RX direction mode: {:?}", rx_mode);
     println!("TX direction: {:?}", tx_direction);
     println!("Rules: {}", rules_path);
@@ -175,6 +186,7 @@ fn main() -> io::Result<()> {
         &running,
         rx_mode,
         tx_direction,
+        plain_mode,
         verbose,
     )?;
 
@@ -194,6 +206,7 @@ fn run_bridge(
     running: &Arc<AtomicBool>,
     rx_mode: DirectionMode,
     tx_direction: Direction,
+    plain_mode: PlainMode,
     verbose: bool,
 ) -> io::Result<()> {
     let schc_socket = UdpSocket::bind(schc_listen_addr)?;
@@ -205,9 +218,11 @@ fn run_bridge(
     println!("  SCHC RX/TX socket: {}", schc_listen_addr);
     println!("  Plain RX/TX socket: {}", plain_listen_addr);
     println!("  Plain peer target: {}", plain_peer_addr);
+    println!("  Plain mode: {:?}", plain_mode);
     println!();
 
     let mut last_schc_sender: Option<SocketAddr> = None;
+    let mut last_plain_request_packet: Option<Vec<u8>> = None;
     let mut schc_buf = [0u8; 2048];
     let mut plain_buf = [0u8; 4096];
 
@@ -230,13 +245,37 @@ fn run_bridge(
                             used_direction
                         );
                         display_packet_structure(&full_data, verbose);
-                        plain_socket.send_to(&full_data, plain_peer_addr)?;
-                        stats.plain_tx_packets.fetch_add(1, Ordering::Relaxed);
-                        println!(
-                            "  Forwarded plain packet: {} bytes to {}",
-                            full_data.len(),
-                            plain_peer_addr
-                        );
+                        match plain_mode {
+                            PlainMode::Ipv6 => {
+                                plain_socket.send_to(&full_data, plain_peer_addr)?;
+                                stats.plain_tx_packets.fetch_add(1, Ordering::Relaxed);
+                                println!(
+                                    "  Forwarded plain IPv6 packet: {} bytes to {}",
+                                    full_data.len(),
+                                    plain_peer_addr
+                                );
+                            }
+                            PlainMode::Coap => {
+                                if full_data.len() < 48 {
+                                    stats.schc_decompress_fail.fetch_add(1, Ordering::Relaxed);
+                                    println!("  Packet too short for IPv6/UDP->CoAP extraction");
+                                    println!();
+                                    continue;
+                                }
+                                let coap = &full_data[48..];
+                                plain_socket.send_to(coap, plain_peer_addr)?;
+                                last_plain_request_packet = Some(full_data.clone());
+                                stats.plain_tx_packets.fetch_add(1, Ordering::Relaxed);
+                                println!(
+                                    "  Forwarded CoAP payload: {} bytes to {}",
+                                    coap.len(),
+                                    plain_peer_addr
+                                );
+                                if verbose {
+                                    println!("  CoAP request hex: {}", hex::encode(coap));
+                                }
+                            }
+                        }
                     }
                     Err(e) => {
                         stats.schc_decompress_fail.fetch_add(1, Ordering::Relaxed);
@@ -255,9 +294,33 @@ fn run_bridge(
                 let plain_data = &plain_buf[..len];
                 println!("[PLAIN RX] {} bytes from {}", len, src);
 
+                let tx_packet = match plain_mode {
+                    PlainMode::Ipv6 => plain_data.to_vec(),
+                    PlainMode::Coap => {
+                        let Some(request_packet) = last_plain_request_packet.as_ref() else {
+                            stats.schc_compress_fail.fetch_add(1, Ordering::Relaxed);
+                            println!("  No request context available to wrap CoAP response");
+                            println!();
+                            continue;
+                        };
+                        if verbose {
+                            println!("  CoAP response hex: {}", hex::encode(plain_data));
+                        }
+                        match build_ipv6_udp_response(request_packet, plain_data) {
+                            Ok(pkt) => pkt,
+                            Err(e) => {
+                                stats.schc_compress_fail.fetch_add(1, Ordering::Relaxed);
+                                println!("  Failed to build IPv6/UDP response: {}", e);
+                                println!();
+                                continue;
+                            }
+                        }
+                    }
+                };
+
                 match compress_packet_with_link_layer(
                     tree,
-                    plain_data,
+                    &tx_packet,
                     tx_direction,
                     &ruleset.rules,
                     verbose,
@@ -343,6 +406,17 @@ fn parse_direction(value: &str) -> io::Result<Direction> {
     }
 }
 
+fn parse_plain_mode(value: &str) -> io::Result<PlainMode> {
+    match value.to_ascii_lowercase().as_str() {
+        "coap" => Ok(PlainMode::Coap),
+        "ipv6" | "raw" => Ok(PlainMode::Ipv6),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("Invalid --plain-mode '{}'. Use coap|ipv6", value),
+        )),
+    }
+}
+
 fn resolve_socket_addr(addr: &str, arg_name: &str) -> io::Result<SocketAddr> {
     let addrs: Vec<SocketAddr> = addr
         .to_socket_addrs()
@@ -369,6 +443,36 @@ fn load_rules(path: &str) -> io::Result<Vec<Rule>> {
         serde_json::from_str(&content)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("JSON parse error: {}", e)))
     }
+}
+
+fn build_ipv6_udp_response(request_packet: &[u8], coap_response: &[u8]) -> io::Result<Vec<u8>> {
+    if request_packet.len() < 48 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Request packet too short for IPv6/UDP: {} bytes", request_packet.len()),
+        ));
+    }
+
+    let mut response = Vec::with_capacity(40 + 8 + coap_response.len());
+    response.extend_from_slice(&request_packet[0..4]); // Version/TC/FL
+
+    let payload_length = (8 + coap_response.len()) as u16;
+    response.extend_from_slice(&payload_length.to_be_bytes());
+    response.push(request_packet[6]); // Next Header
+    response.push(request_packet[7]); // Hop Limit
+
+    // Swap source/destination IPv6 addresses.
+    response.extend_from_slice(&request_packet[24..40]);
+    response.extend_from_slice(&request_packet[8..24]);
+
+    // Swap UDP ports.
+    response.extend_from_slice(&request_packet[42..44]);
+    response.extend_from_slice(&request_packet[40..42]);
+    response.extend_from_slice(&payload_length.to_be_bytes());
+    response.extend_from_slice(&[0x00, 0x00]); // checksum compute by rule behavior
+
+    response.extend_from_slice(coap_response);
+    Ok(response)
 }
 
 fn decompress_with_mode(
@@ -413,6 +517,7 @@ fn print_usage() {
     println!();
     println!("Optional:");
     println!("  --schc-peer <ip:port>      Fixed SCHC target (otherwise auto-reply to last SCHC sender)");
+    println!("  --plain-mode <coap|ipv6>   coap: plain side carries CoAP bytes; ipv6: carries full IPv6 packet");
     println!("  --rules <path>             Rules file (.sor/.cbor/.json), default rules/base-ipv6-udp.sor");
     println!("  --rx-direction <up|down|auto>");
     println!("  --tx-direction <up|down>");
@@ -420,10 +525,10 @@ fn print_usage() {
     println!();
     println!("Examples:");
     println!("  # Core role:");
-    println!("  cargo run --example udp_tunnel_interop -- --position core --schc-listen 0.0.0.0:23628 --plain-listen 0.0.0.0:23629 --plain-peer 127.0.0.1:5683 --rules rules/docker1.sor -v");
+    println!("  cargo run --example udp_tunnel_interop -- --position core --plain-mode coap --schc-listen 0.0.0.0:23628 --plain-listen 0.0.0.0:23629 --plain-peer 127.0.0.1:5683 --rules rules/docker1.sor -v");
     println!();
     println!("  # Device role:");
-    println!("  cargo run --example udp_tunnel_interop -- --position device --schc-listen 0.0.0.0:23628 --schc-peer 192.0.2.10:23628 --plain-listen 0.0.0.0:23629 --plain-peer 127.0.0.1:5683 --rules rules/docker1.sor -v");
+    println!("  cargo run --example udp_tunnel_interop -- --position device --plain-mode coap --schc-listen 0.0.0.0:23628 --schc-peer 192.0.2.10:23628 --plain-listen 0.0.0.0:23629 --plain-peer 127.0.0.1:5683 --rules rules/docker1.sor -v");
 }
 
 fn display_packet_structure(data: &[u8], verbose: bool) {
