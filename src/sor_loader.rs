@@ -229,11 +229,26 @@ fn parse_normal_field_entry(
     entry_map: &[(CborValue, CborValue)],
     sid_file: &SidFile,
 ) -> Result<Field> {
-    // Field ID (delta +3 = 2623, identityref)
-    let fid_sid = find_integer_by_delta(entry_map, DELTA_FIELD_ID)
-        .ok_or_else(|| Error::Coreconf("Field ID not found".to_string()))?;
+    let space_id = find_integer_by_delta(entry_map, DELTA_SPACE_ID);
 
-    let fid = sid_to_field_id(fid_sid, sid_file)?;
+    // Field ID (delta +3 = 2623)
+    let (fid, coap_option_number) = if space_id == Some(SID_SPACE_ID_COAP) {
+        // In CoAP option space, field-id is the CoAP option number itself.
+        let option_num_raw = find_integer_by_delta(entry_map, DELTA_FIELD_ID)
+            .ok_or_else(|| Error::Coreconf("Field ID not found".to_string()))?;
+        let option_num = u16::try_from(option_num_raw).map_err(|_| {
+            Error::Coreconf(format!(
+                "CoAP option number out of range for field-id: {}",
+                option_num_raw
+            ))
+        })?;
+        (coap_option_to_field_id(option_num), Some(option_num))
+    } else {
+        let fid_sid = find_integer_by_delta(entry_map, DELTA_FIELD_ID)
+            .ok_or_else(|| Error::Coreconf("Field ID not found".to_string()))?;
+        let fid = sid_to_field_id(fid_sid, sid_file)?;
+        (fid, field_id_to_coap_option_num(fid))
+    };
 
     // Field Length (delta +4 = 2624) — union of uint8 (fixed) or identity SID (function)
     // Field Length Value (delta +5 = 2625) — argument for some fl functions
@@ -264,7 +279,7 @@ fn parse_normal_field_entry(
         fid,
         fl,
         fp: None,
-        coap_option_number: field_id_to_coap_option_num(fid),
+        coap_option_number,
         di,
         tv,
         mo,
@@ -359,9 +374,8 @@ fn parse_fl_value(
     fl_value: Option<&CborValue>,
     fl_arg: Option<usize>,
 ) -> (Option<u16>, Option<FieldLength>) {
-    match fl_value {
-        Some(CborValue::Integer(i)) => {
-            let val = i128::from(*i) as i64;
+    match fl_value.and_then(cbor_integer_value) {
+        Some(val) => {
             // Distinguish between a small fixed length (uint8) and an identity SID (>= 2890)
             match val {
                 SID_FL_TOKEN_LENGTH => (None, Some(FieldLength::TokenLength)),
@@ -369,10 +383,10 @@ fn parse_fl_value(
                 SID_FL_LENGTH_BITS => (None, Some(FieldLength::LengthBits(fl_arg.unwrap_or(0)))),
                 SID_FL_VARIABLE => (None, Some(FieldLength::Variable)),
                 v if (0..=255).contains(&v) => (Some(v as u16), None), // uint8 fixed length
-                _ => (None, None),                                 // Unknown
+                _ => (None, None),                                     // Unknown
             }
         }
-        _ => (None, None),
+        None => (None, None),
     }
 }
 
@@ -515,16 +529,18 @@ fn find_value_by_neg_delta(map: &[(CborValue, CborValue)], neg_delta: i64) -> Op
 
 fn find_integer_by_delta(map: &[(CborValue, CborValue)], delta: i64) -> Option<i64> {
     let value = find_value_by_delta(map, delta)?;
-    match value {
-        CborValue::Integer(i) => Some(i128::from(*i) as i64),
-        _ => None,
-    }
+    cbor_integer_value(value)
 }
 
 fn find_integer_by_neg_delta(map: &[(CborValue, CborValue)], neg_delta: i64) -> Option<i64> {
     let value = find_value_by_neg_delta(map, neg_delta)?;
+    cbor_integer_value(value)
+}
+
+fn cbor_integer_value(value: &CborValue) -> Option<i64> {
     match value {
         CborValue::Integer(i) => Some(i128::from(*i) as i64),
+        CborValue::Tag(_, inner) => cbor_integer_value(inner),
         _ => None,
     }
 }
@@ -1241,6 +1257,51 @@ mod tests {
             .map(|(_, v)| v.as_integer().map(|i| i128::from(i) as i64))
             .flatten();
         assert_eq!(opt_num, Some(11), "Option number should be 11 (Uri-Path)");
+    }
+
+    #[test]
+    fn test_parse_normal_coap_option_space_entry() {
+        let sid_file = create_test_sid_file();
+        let entry = CborValue::Map(vec![
+            (
+                CborValue::Integer(DELTA_SPACE_ID.into()),
+                CborValue::Integer(SID_SPACE_ID_COAP.into()),
+            ),
+            (
+                CborValue::Integer(DELTA_FIELD_ID.into()),
+                CborValue::Integer(11.into()),
+            ),
+            (
+                CborValue::Integer(DELTA_FIELD_LENGTH.into()),
+                CborValue::Tag(45, Box::new(CborValue::Integer(SID_FL_VARIABLE.into()))),
+            ),
+            (
+                CborValue::Integer(DELTA_DIRECTION.into()),
+                CborValue::Integer(SID_DI_UP.into()),
+            ),
+            (
+                CborValue::Integer(DELTA_MO.into()),
+                CborValue::Integer(SID_MO_IGNORE.into()),
+            ),
+            (
+                CborValue::Integer(DELTA_CDA.into()),
+                CborValue::Integer(SID_CDA_NOT_SENT.into()),
+            ),
+        ]);
+
+        let field = parse_field_entry(&entry, &sid_file).expect("entry should parse");
+        assert_eq!(field.fid, FieldId::CoapUriPath);
+        assert_eq!(field.coap_option_number, Some(11));
+        assert_eq!(field.fl_func, Some(FieldLength::Variable));
+        assert_eq!(field.di, Some(schc::Direction::Up));
+    }
+
+    #[test]
+    fn test_parse_fl_value_from_tagged_identityref() {
+        let tagged = CborValue::Tag(45, Box::new(CborValue::Integer(SID_FL_VARIABLE.into())));
+        let (fl, fl_func) = parse_fl_value(Some(&tagged), None);
+        assert_eq!(fl, None);
+        assert_eq!(fl_func, Some(FieldLength::Variable));
     }
 
     #[test]
