@@ -580,6 +580,12 @@ fn run_echo_mode(
                                 stats.tx_packets.fetch_add(1, Ordering::Relaxed);
 
                                 let target = fixed_reply_target.unwrap_or(src);
+                                if verbose {
+                                    println!(
+                                        "  SCHC downlink bytes (hex): {}",
+                                        hex::encode(&compressed.data)
+                                    );
+                                }
                                 socket.send_to(&compressed.data, target)?;
                                 println!(
                                     "  Echo sent: {} bytes to {} (rule {}/{}, Direction={:?})",
@@ -671,6 +677,12 @@ fn forward_to_single_coap_target(
         Err(e) => return Err(e),
     };
     println!("  CoAP response: {} bytes from {}", resp_len, resp_src);
+    if verbose {
+        println!(
+            "  CoAP response bytes (hex): {}",
+            hex::encode(&response_buf[..resp_len])
+        );
+    }
     Ok(response_buf[..resp_len].to_vec())
 }
 
