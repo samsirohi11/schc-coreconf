@@ -414,7 +414,7 @@ fn run_receiver(
                             rule_id_length,
                             used_direction
                         );
-                        display_ipv6_udp(&full_data);
+                        display_packet_structure(&full_data, verbose);
                     }
                     Err(e) => {
                         stats.rx_decompress_fail.fetch_add(1, Ordering::Relaxed);
@@ -550,10 +550,10 @@ fn run_echo_mode(
                             used_direction
                         );
 
-                        display_ipv6_udp(&full_data);
+                        display_packet_structure(&full_data, verbose);
 
                         let tx_packet = if let Some(targets) = coap_targets.as_deref() {
-                            match forward_to_coap_and_build_response(&full_data, targets) {
+                            match forward_to_coap_and_build_response(&full_data, targets, verbose) {
                                 Ok(packet) => packet,
                                 Err(e) => {
                                     stats.tx_compress_fail.fetch_add(1, Ordering::Relaxed);
@@ -617,6 +617,7 @@ fn run_echo_mode(
 fn forward_to_coap_and_build_response(
     ipv6_udp_packet: &[u8],
     coap_targets: &[SocketAddr],
+    verbose: bool,
 ) -> io::Result<Vec<u8>> {
     if ipv6_udp_packet.len() < 48 {
         return Err(io::Error::new(
@@ -628,7 +629,7 @@ fn forward_to_coap_and_build_response(
     let request_coap = &ipv6_udp_packet[48..];
     let mut last_error = None;
     for coap_target in coap_targets {
-        match forward_to_single_coap_target(request_coap, *coap_target) {
+        match forward_to_single_coap_target(request_coap, *coap_target, verbose) {
             Ok(coap_response) => return build_ipv6_udp_response(ipv6_udp_packet, &coap_response),
             Err(e) => {
                 println!("  CoAP target {} failed: {}", coap_target, e);
@@ -642,17 +643,33 @@ fn forward_to_coap_and_build_response(
     }))
 }
 
-fn forward_to_single_coap_target(request_coap: &[u8], coap_target: SocketAddr) -> io::Result<Vec<u8>> {
+fn forward_to_single_coap_target(
+    request_coap: &[u8],
+    coap_target: SocketAddr,
+    verbose: bool,
+) -> io::Result<Vec<u8>> {
     let coap_socket = match coap_target {
         SocketAddr::V4(_) => UdpSocket::bind("0.0.0.0:0")?,
         SocketAddr::V6(_) => UdpSocket::bind("[::]:0")?,
     };
     coap_socket.set_read_timeout(Some(Duration::from_secs(5)))?;
+    if verbose {
+        println!("  CoAP request bytes (hex): {}", hex::encode(request_coap));
+    }
     coap_socket.send_to(request_coap, coap_target)?;
     println!("  CoAP forwarded: {} bytes to {}", request_coap.len(), coap_target);
 
     let mut response_buf = [0u8; 2048];
-    let (resp_len, resp_src) = coap_socket.recv_from(&mut response_buf)?;
+    let (resp_len, resp_src) = match coap_socket.recv_from(&mut response_buf) {
+        Ok(v) => v,
+        Err(e) if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut => {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("timeout waiting 5s for CoAP response from {}", coap_target),
+            ));
+        }
+        Err(e) => return Err(e),
+    };
     println!("  CoAP response: {} bytes from {}", resp_len, resp_src);
     Ok(response_buf[..resp_len].to_vec())
 }
@@ -873,7 +890,7 @@ fn build_test_ipv6_udp_packet(payload: &str) -> Vec<u8> {
     packet
 }
 
-fn display_ipv6_udp(data: &[u8]) {
+fn display_packet_structure(data: &[u8], verbose: bool) {
     if data.len() < 40 {
         println!("  [Too short for IPv6]");
         return;
@@ -916,5 +933,195 @@ fn display_ipv6_udp(data: &[u8]) {
         let udp_len = u16::from_be_bytes([udp[4], udp[5]]);
         let udp_checksum = u16::from_be_bytes([udp[6], udp[7]]);
         println!("  UDP: {}:{}, len={}, checksum={}", src_port, dst_port, udp_len, udp_checksum);
+
+        let coap = &data[48..];
+        println!("  CoAP bytes: {}", coap.len());
+        if verbose {
+            display_coap_structure(coap);
+        }
+    }
+
+    if verbose {
+        println!("  Full decompressed hex ({} bytes): {}", data.len(), hex::encode(data));
     }
 }
+
+fn display_coap_structure(coap: &[u8]) {
+    if coap.is_empty() {
+        println!("    CoAP: empty payload");
+        return;
+    }
+    if coap.len() < 4 {
+        println!("    CoAP: too short ({} bytes): {}", coap.len(), hex::encode(coap));
+        return;
+    }
+
+    let ver = (coap[0] >> 6) & 0x03;
+    let typ = (coap[0] >> 4) & 0x03;
+    let tkl = (coap[0] & 0x0F) as usize;
+    let code = coap[1];
+    let mid = u16::from_be_bytes([coap[2], coap[3]]);
+
+    let type_name = match typ {
+        0 => "CON",
+        1 => "NON",
+        2 => "ACK",
+        3 => "RST",
+        _ => "UNK",
+    };
+    println!(
+        "    CoAP: ver={} type={}({}) code={}.{} (0x{:02x}) mid={} tkl={}",
+        ver,
+        typ,
+        type_name,
+        code >> 5,
+        code & 0x1f,
+        code,
+        mid,
+        tkl
+    );
+
+    if coap.len() < 4 + tkl {
+        println!(
+            "    CoAP decode error: token length {} exceeds packet size {}",
+            tkl,
+            coap.len()
+        );
+        return;
+    }
+
+    let token = &coap[4..4 + tkl];
+    println!("    Token: {}", hex::encode(token));
+
+    let mut idx = 4 + tkl;
+    let mut option_number: u16 = 0;
+    let mut option_count = 0usize;
+    let mut payload: &[u8] = &[];
+    let mut parse_error: Option<String> = None;
+    let mut uri_path_parts: Vec<String> = Vec::new();
+    let mut uri_host_parts: Vec<String> = Vec::new();
+
+    while idx < coap.len() {
+        if coap[idx] == 0xff {
+            idx += 1;
+            payload = &coap[idx..];
+            break;
+        }
+
+        let hdr = coap[idx];
+        idx += 1;
+
+        let delta = match parse_coap_nibble((hdr >> 4) & 0x0f, coap, &mut idx) {
+            Ok(v) => v,
+            Err(e) => {
+                parse_error = Some(format!("option delta decode failed: {}", e));
+                break;
+            }
+        };
+        let length = match parse_coap_nibble(hdr & 0x0f, coap, &mut idx) {
+            Ok(v) => v,
+            Err(e) => {
+                parse_error = Some(format!("option length decode failed: {}", e));
+                break;
+            }
+        };
+
+        let length = length as usize;
+        if idx + length > coap.len() {
+            parse_error = Some(format!(
+                "option value length {} exceeds remaining bytes {}",
+                length,
+                coap.len().saturating_sub(idx)
+            ));
+            break;
+        }
+
+        option_number = option_number.saturating_add(delta);
+        option_count += 1;
+        let value = &coap[idx..idx + length];
+        let ascii = ascii_preview(value);
+        println!(
+            "    Option {}: num={} len={} hex={} ascii=\"{}\"",
+            option_count,
+            option_number,
+            length,
+            hex::encode(value),
+            ascii
+        );
+        if option_number == 11 {
+            uri_path_parts.push(ascii_preview(value));
+        } else if option_number == 3 {
+            uri_host_parts.push(ascii_preview(value));
+        }
+        idx += length;
+    }
+
+    if option_count == 0 {
+        println!("    Options: none");
+    }
+    if let Some(err) = parse_error {
+        println!("    CoAP option parse error: {}", err);
+    }
+    if !uri_host_parts.is_empty() {
+        println!("    URI-Host: {}", uri_host_parts.join(","));
+    }
+    if !uri_path_parts.is_empty() {
+        let uri_path = format!("/{}", uri_path_parts.join("/"));
+        println!("    URI-Path: {}", uri_path);
+    } else {
+        println!("    URI-Path: <none>");
+    }
+
+    println!(
+        "    CoAP payload: {} bytes hex={} ascii=\"{}\"",
+        payload.len(),
+        hex::encode(payload),
+        ascii_preview(payload)
+    );
+}
+
+fn parse_coap_nibble(raw: u8, data: &[u8], idx: &mut usize) -> io::Result<u16> {
+    match raw {
+        0..=12 => Ok(raw as u16),
+        13 => {
+            if *idx >= data.len() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "missing extended nibble byte",
+                ));
+            }
+            let ext = data[*idx] as u16;
+            *idx += 1;
+            Ok(13 + ext)
+        }
+        14 => {
+            if *idx + 1 >= data.len() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "missing extended nibble 16-bit value",
+                ));
+            }
+            let ext = u16::from_be_bytes([data[*idx], data[*idx + 1]]);
+            *idx += 2;
+            Ok(269 + ext)
+        }
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "reserved nibble value 15",
+        )),
+    }
+}
+
+fn ascii_preview(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|b| {
+            if b.is_ascii_graphic() || *b == b' ' {
+                *b as char
+            } else {
+                '.'
+            }
+        })
+        .collect()
+}
+
