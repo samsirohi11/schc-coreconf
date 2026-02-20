@@ -582,6 +582,10 @@ fn run_echo_mode(
                                 let target = fixed_reply_target.unwrap_or(src);
                                 if verbose {
                                     println!(
+                                        "  SCHC downlink bits: {}",
+                                        compressed.bit_length
+                                    );
+                                    println!(
                                         "  SCHC downlink bytes (hex): {}",
                                         hex::encode(&compressed.data)
                                     );
