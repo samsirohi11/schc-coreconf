@@ -24,10 +24,10 @@
 //!   cargo run --example udp_tunnel_interop -- --listen 127.0.0.1:9000 --echo --rules rules.sor
 //!
 //!   # Server mode for Docker interop (listen on all interfaces, auto RX direction, DOWN on TX):
-//!   cargo run --example udp_tunnel_interop -- --server --rules rules/test-rule.json -v
+//!   cargo run --example udp_tunnel_interop -- --server --rules rules/docker1.sor -v
 //!
 //!   # Core proxy mode (decompress, forward to CoAP server, recompress response):
-//!   cargo run --example udp_tunnel_interop -- --server --coap-server user.plido.net:5683 --rules rules/test-rule.json -v
+//!   cargo run --example udp_tunnel_interop -- --server --coap-server user.plido.net:5683 --rules rules/docker1.sor -v
 //!
 //! For interop testing:
 //!   1. Have the same rule file on both sides (sor or json)
@@ -341,19 +341,25 @@ fn print_usage() {
     println!("  cargo run --example udp_tunnel_interop -- --listen 127.0.0.1:9000 --send 127.0.0.1:9001 --rules rules.sor");
 }
 
-fn resolve_socket_addr(addr: &str, arg_name: &str) -> io::Result<SocketAddr> {
-    let mut addrs = addr.to_socket_addrs().map_err(|e| {
+fn resolve_socket_addrs(addr: &str, arg_name: &str) -> io::Result<Vec<SocketAddr>> {
+    let addrs: Vec<SocketAddr> = addr.to_socket_addrs().map_err(|e| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("Invalid {} '{}': {}", arg_name, addr, e),
         )
-    })?;
-    addrs.next().ok_or_else(|| {
-        io::Error::new(
+    })?.collect();
+    if addrs.is_empty() {
+        Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("{} '{}' resolved to no socket address", arg_name, addr),
-        )
-    })
+        ))
+    } else {
+        Ok(addrs)
+    }
+}
+
+fn resolve_socket_addr(addr: &str, arg_name: &str) -> io::Result<SocketAddr> {
+    Ok(resolve_socket_addrs(addr, arg_name)?[0])
 }
 
 fn load_rules(path: &str) -> io::Result<Vec<Rule>> {
@@ -493,21 +499,22 @@ fn run_echo_mode(
         Some(dst) => Some(resolve_socket_addr(dst, "--reply-to/--downlink-target")?),
         None => None,
     };
-    let coap_target = match coap_server {
-        Some(dst) => Some(resolve_socket_addr(dst, "--coap-server")?),
+    let coap_targets = match coap_server {
+        Some(dst) => Some(resolve_socket_addrs(dst, "--coap-server")?),
         None => None,
-    };
-    let coap_socket = if coap_target.is_some() {
-        let s = UdpSocket::bind("0.0.0.0:0")?;
-        s.set_read_timeout(Some(Duration::from_secs(5)))?;
-        Some(s)
-    } else {
-        None
     };
 
     println!("Echo/server mode listening on {}", addr);
-    if let Some(target) = coap_target {
-        println!("Will decompress, proxy CoAP to {}, and send compressed response.", target);
+    if let Some(targets) = coap_targets.as_ref() {
+        let targets = targets
+            .iter()
+            .map(|target| target.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!(
+            "Will decompress, proxy CoAP to [{}], and send compressed response.",
+            targets
+        );
     } else {
         println!("Will decompress, re-compress, and send back to sender.");
     }
@@ -545,15 +552,8 @@ fn run_echo_mode(
 
                         display_ipv6_udp(&full_data);
 
-                        let tx_packet = if let Some(target) = coap_target {
-                            let Some(coap_sock) = coap_socket.as_ref() else {
-                                stats.tx_compress_fail.fetch_add(1, Ordering::Relaxed);
-                                println!("  CoAP socket unavailable");
-                                println!();
-                                continue;
-                            };
-
-                            match forward_to_coap_and_build_response(&full_data, coap_sock, target) {
+                        let tx_packet = if let Some(targets) = coap_targets.as_deref() {
+                            match forward_to_coap_and_build_response(&full_data, targets) {
                                 Ok(packet) => packet,
                                 Err(e) => {
                                     stats.tx_compress_fail.fetch_add(1, Ordering::Relaxed);
@@ -616,8 +616,7 @@ fn run_echo_mode(
 
 fn forward_to_coap_and_build_response(
     ipv6_udp_packet: &[u8],
-    coap_socket: &UdpSocket,
-    coap_target: SocketAddr,
+    coap_targets: &[SocketAddr],
 ) -> io::Result<Vec<u8>> {
     if ipv6_udp_packet.len() < 48 {
         return Err(io::Error::new(
@@ -627,14 +626,35 @@ fn forward_to_coap_and_build_response(
     }
 
     let request_coap = &ipv6_udp_packet[48..];
+    let mut last_error = None;
+    for coap_target in coap_targets {
+        match forward_to_single_coap_target(request_coap, *coap_target) {
+            Ok(coap_response) => return build_ipv6_udp_response(ipv6_udp_packet, &coap_response),
+            Err(e) => {
+                println!("  CoAP target {} failed: {}", coap_target, e);
+                last_error = Some(e);
+            }
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "No CoAP targets resolved")
+    }))
+}
+
+fn forward_to_single_coap_target(request_coap: &[u8], coap_target: SocketAddr) -> io::Result<Vec<u8>> {
+    let coap_socket = match coap_target {
+        SocketAddr::V4(_) => UdpSocket::bind("0.0.0.0:0")?,
+        SocketAddr::V6(_) => UdpSocket::bind("[::]:0")?,
+    };
+    coap_socket.set_read_timeout(Some(Duration::from_secs(5)))?;
     coap_socket.send_to(request_coap, coap_target)?;
     println!("  CoAP forwarded: {} bytes to {}", request_coap.len(), coap_target);
 
     let mut response_buf = [0u8; 2048];
     let (resp_len, resp_src) = coap_socket.recv_from(&mut response_buf)?;
     println!("  CoAP response: {} bytes from {}", resp_len, resp_src);
-
-    build_ipv6_udp_response(ipv6_udp_packet, &response_buf[..resp_len])
+    Ok(response_buf[..resp_len].to_vec())
 }
 
 fn build_ipv6_udp_response(request_packet: &[u8], coap_response: &[u8]) -> io::Result<Vec<u8>> {
