@@ -74,6 +74,13 @@ const SID_FL_VARIABLE: i64 = 2893;
 
 // Identity SID for CoAP Space ID (universal options)
 const SID_SPACE_ID_COAP: i64 = 2930;
+// Private extension SIDs for QUIC fields until assigned in IETF SCHC SID file
+const SID_QUIC_FIRST_BYTE: i64 = 2940;
+const SID_QUIC_VERSION: i64 = 2941;
+const SID_QUIC_DCID_LEN: i64 = 2942;
+const SID_QUIC_DCID: i64 = 2943;
+const SID_QUIC_SCID_LEN: i64 = 2944;
+const SID_QUIC_SCID: i64 = 2945;
 
 // Negative deltas for universal option entries (CoAP options, etc.)
 // These are used instead of positive deltas when encoding CoAP options
@@ -588,6 +595,14 @@ fn sid_to_field_id(sid: i64, _sid_file: &SidFile) -> Result<FieldId> {
         2816 => Ok(FieldId::Icmpv6Sequence),
         2817 => Ok(FieldId::Icmpv6Payload),
 
+        // QUIC fields (private extension)
+        SID_QUIC_FIRST_BYTE => Ok(FieldId::QuicFirstByte),
+        SID_QUIC_VERSION => Ok(FieldId::QuicVersion),
+        SID_QUIC_DCID_LEN => Ok(FieldId::QuicDcidLen),
+        SID_QUIC_DCID => Ok(FieldId::QuicDcid),
+        SID_QUIC_SCID_LEN => Ok(FieldId::QuicScidLen),
+        SID_QUIC_SCID => Ok(FieldId::QuicScid),
+
         _ => Err(Error::Coreconf(format!("Unknown field SID: {}", sid))),
     }
 }
@@ -749,6 +764,14 @@ pub fn field_id_to_sid(fid: FieldId) -> Option<i64> {
         FieldId::Icmpv6Pointer => Some(2815),
         FieldId::Icmpv6Sequence => Some(2816),
         FieldId::Icmpv6Payload => Some(2817),
+
+        // QUIC fields (private extension)
+        FieldId::QuicFirstByte => Some(SID_QUIC_FIRST_BYTE),
+        FieldId::QuicVersion => Some(SID_QUIC_VERSION),
+        FieldId::QuicDcidLen => Some(SID_QUIC_DCID_LEN),
+        FieldId::QuicDcid => Some(SID_QUIC_DCID),
+        FieldId::QuicScidLen => Some(SID_QUIC_SCID_LEN),
+        FieldId::QuicScid => Some(SID_QUIC_SCID),
 
         // CoAP options do not have dedicated field-id SIDs in ietf-schc.
         FieldId::CoapIfMatch
@@ -1147,6 +1170,16 @@ mod tests {
             sid_to_field_id(2850, &sid_file),
             Ok(FieldId::UdpDevPort)
         ));
+        assert!(matches!(
+            sid_to_field_id(SID_QUIC_FIRST_BYTE, &sid_file),
+            Ok(FieldId::QuicFirstByte)
+        ));
+        assert!(matches!(
+            sid_to_field_id(SID_QUIC_SCID, &sid_file),
+            Ok(FieldId::QuicScid)
+        ));
+        assert_eq!(field_id_to_sid(FieldId::QuicVersion), Some(SID_QUIC_VERSION));
+        assert_eq!(field_id_to_sid(FieldId::QuicDcidLen), Some(SID_QUIC_DCID_LEN));
     }
 
     #[test]

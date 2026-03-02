@@ -14,7 +14,7 @@
 
 use rust_coreconf::CoreconfModel;
 use schc::Rule;
-use schc_coreconf::sor_loader::{load_sor_rules, rules_to_cbor, display_rules_with_sids};
+use schc_coreconf::sor_loader::{display_rules_with_sids, load_sor_rules, rules_to_cbor};
 use std::env;
 
 fn main() {
@@ -34,7 +34,8 @@ fn main() {
             json_to_sor(&args[2], &args[3]);
         }
         "sor2json" => {
-            let sid_file_path = args.iter()
+            let sid_file_path = args
+                .iter()
                 .position(|a| a == "--sid")
                 .and_then(|i| args.get(i + 1))
                 .map(|s| s.as_str())
@@ -94,7 +95,10 @@ fn json_to_sor(json_path: &str, sor_path: &str) {
     match std::fs::write(sor_path, &cbor_bytes) {
         Ok(_) => {
             println!("Written {} bytes to {}", cbor_bytes.len(), sor_path);
-            println!("CBOR hex: {}", hex::encode(&cbor_bytes[..cbor_bytes.len().min(100)]));
+            println!(
+                "CBOR hex: {}",
+                hex::encode(&cbor_bytes[..cbor_bytes.len().min(100)])
+            );
             if cbor_bytes.len() > 100 {
                 println!("  ... ({} more bytes)", cbor_bytes.len() - 100);
             }
@@ -106,7 +110,10 @@ fn json_to_sor(json_path: &str, sor_path: &str) {
 }
 
 fn sor_to_json(sor_path: &str, sid_file_path: &str) {
-    println!("Converting {} -> JSON (using SID file: {})", sor_path, sid_file_path);
+    println!(
+        "Converting {} -> JSON (using SID file: {})",
+        sor_path, sid_file_path
+    );
 
     // Load SID file
     let model = match CoreconfModel::new(sid_file_path) {

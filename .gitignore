@@ -19,9 +19,10 @@ Thumbs.db
 *.pdb
 
 AGENTS.md
-interop_report.md
 .copilot_refs/
 examples/rmd.md
 examples/rmd.rs
 rules/docker1.json
 rules/docker1.sor
+examples/odr.md
+examples/odr.rs

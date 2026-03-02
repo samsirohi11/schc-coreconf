@@ -13,8 +13,8 @@ use std::io::Cursor;
 use std::sync::{Arc, RwLock};
 
 use crate::conversion::{
-    schc_rule_to_yang_with_metadata, yang_to_schc_rule_with_metadata, RuleMetadata, RuleNature,
-    RuleStatus,
+    RuleMetadata, RuleNature, RuleStatus, schc_rule_to_yang_with_metadata,
+    yang_to_schc_rule_with_metadata,
 };
 use crate::error::{CoapCode, Error, Result};
 use crate::manager::SchcCoreconfManager;

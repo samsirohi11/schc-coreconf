@@ -458,7 +458,11 @@ pub fn analyze_rpc_overhead(
     let mods_array_overhead = match modifications {
         // delta 5 (1 byte) + array header (1-2 bytes depending on count)
         Some(mods) if !mods.is_empty() => {
-            if mods.len() < 24 { 2 } else { 3 }
+            if mods.len() < 24 {
+                2
+            } else {
+                3
+            }
         }
         _ => 0,
     };
@@ -468,8 +472,10 @@ pub fn analyze_rpc_overhead(
         .map(|mods| mods.iter().map(analyze_modification_overhead).collect())
         .unwrap_or_default();
 
-    let total_per_field_overhead: usize =
-        modification_overheads.iter().map(|m| m.overhead_bytes).sum();
+    let total_per_field_overhead: usize = modification_overheads
+        .iter()
+        .map(|m| m.overhead_bytes)
+        .sum();
     let avg_per_field_overhead = if modification_overheads.is_empty() {
         0.0
     } else {

@@ -16,7 +16,10 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use rust_coreconf::SidFile;
-use schc::{Direction, LinkLayer, Rule, RuleSet, TreeNode, build_tree, compress_packet_with_link_layer, decompress_packet};
+use schc::{
+    Direction, LinkLayer, Rule, RuleSet, TreeNode, build_tree, compress_packet_with_link_layer,
+    decompress_packet,
+};
 use schc_coreconf::load_sor_rules;
 
 const SID_FILE_PATH: &str = "samples/ietf-schc@2026-01-12.sid";
@@ -93,20 +96,35 @@ fn main() -> io::Result<()> {
         return Ok(());
     }
 
-    let position = parse_position(
-        &arg_value(&args, "--position")
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Missing --position <device|core>"))?,
-    )?;
+    let position = parse_position(&arg_value(&args, "--position").ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Missing --position <device|core>",
+        )
+    })?)?;
 
-    let schc_listen = arg_value(&args, "--schc-listen")
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Missing --schc-listen <ip:port>"))?;
-    let plain_listen = arg_value(&args, "--plain-listen")
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Missing --plain-listen <ip:port>"))?;
-    let plain_peer = arg_value(&args, "--plain-peer")
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Missing --plain-peer <ip:port>"))?;
+    let schc_listen = arg_value(&args, "--schc-listen").ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Missing --schc-listen <ip:port>",
+        )
+    })?;
+    let plain_listen = arg_value(&args, "--plain-listen").ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Missing --plain-listen <ip:port>",
+        )
+    })?;
+    let plain_peer = arg_value(&args, "--plain-peer").ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Missing --plain-peer <ip:port>",
+        )
+    })?;
 
     let schc_peer = arg_value(&args, "--schc-peer");
-    let rules_path = arg_value(&args, "--rules").unwrap_or_else(|| "rules/base-ipv6-udp.sor".to_string());
+    let rules_path =
+        arg_value(&args, "--rules").unwrap_or_else(|| "rules/base-ipv6-udp.sor".to_string());
     let plain_mode = arg_value(&args, "--plain-mode")
         .map(|s| parse_plain_mode(&s))
         .transpose()?
@@ -164,11 +182,18 @@ fn main() -> io::Result<()> {
     let rules = load_rules(&rules_path)?;
     println!("Loaded {} rule(s)", rules.len());
     for rule in &rules {
-        println!("  Rule {}/{}: {} fields", rule.rule_id, rule.rule_id_length, rule.compression.len());
+        println!(
+            "  Rule {}/{}: {} fields",
+            rule.rule_id,
+            rule.rule_id_length,
+            rule.compression.len()
+        );
     }
     println!();
 
-    let ruleset = Arc::new(RuleSet { rules: rules.clone() });
+    let ruleset = Arc::new(RuleSet {
+        rules: rules.clone(),
+    });
     let tree = Arc::new(build_tree(&ruleset.rules));
     let stats = Arc::new(Stats::default());
     let running = Arc::new(AtomicBool::new(true));
@@ -243,7 +268,10 @@ fn run_bridge(
         && matches!(coap_target_mode, CoapTargetMode::PlainPeer)
         && plain_peer_addr.ip().is_loopback()
     {
-        println!("  Note: loopback plain-peer requires a local CoAP service on {}", plain_peer_addr);
+        println!(
+            "  Note: loopback plain-peer requires a local CoAP service on {}",
+            plain_peer_addr
+        );
     }
     println!();
 
@@ -291,15 +319,22 @@ fn run_bridge(
                                 let coap = &full_data[48..];
                                 last_plain_request_packet = Some(full_data.clone());
                                 let coap_target = match coap_target_mode {
-                                    CoapTargetMode::Packet => match extract_udp_destination_from_packet(&full_data) {
-                                        Ok(target) => target,
-                                        Err(e) => {
-                                            stats.schc_decompress_fail.fetch_add(1, Ordering::Relaxed);
-                                            println!("  Failed to determine CoAP target from packet: {}", e);
-                                            println!();
-                                            continue;
+                                    CoapTargetMode::Packet => {
+                                        match extract_udp_destination_from_packet(&full_data) {
+                                            Ok(target) => target,
+                                            Err(e) => {
+                                                stats
+                                                    .schc_decompress_fail
+                                                    .fetch_add(1, Ordering::Relaxed);
+                                                println!(
+                                                    "  Failed to determine CoAP target from packet: {}",
+                                                    e
+                                                );
+                                                println!();
+                                                continue;
+                                            }
                                         }
-                                    },
+                                    }
                                     CoapTargetMode::PlainPeer => plain_peer_addr,
                                 };
 
@@ -320,20 +355,34 @@ fn run_bridge(
                                     }
                                     CoapTargetMode::Packet => {
                                         stats.plain_tx_packets.fetch_add(1, Ordering::Relaxed);
-                                        match send_coap_and_receive_response(coap, coap_target, Duration::from_secs(5)) {
+                                        match send_coap_and_receive_response(
+                                            coap,
+                                            coap_target,
+                                            Duration::from_secs(5),
+                                        ) {
                                             Ok(response_coap) => {
-                                                stats.plain_rx_packets.fetch_add(1, Ordering::Relaxed);
+                                                stats
+                                                    .plain_rx_packets
+                                                    .fetch_add(1, Ordering::Relaxed);
                                                 if verbose {
                                                     println!(
                                                         "  CoAP response hex: {}",
                                                         hex::encode(&response_coap)
                                                     );
                                                 }
-                                                let tx_packet = match build_ipv6_udp_response(&full_data, &response_coap) {
+                                                let tx_packet = match build_ipv6_udp_response(
+                                                    &full_data,
+                                                    &response_coap,
+                                                ) {
                                                     Ok(pkt) => pkt,
                                                     Err(e) => {
-                                                        stats.schc_compress_fail.fetch_add(1, Ordering::Relaxed);
-                                                        println!("  Failed to build IPv6/UDP response: {}", e);
+                                                        stats
+                                                            .schc_compress_fail
+                                                            .fetch_add(1, Ordering::Relaxed);
+                                                        println!(
+                                                            "  Failed to build IPv6/UDP response: {}",
+                                                            e
+                                                        );
                                                         println!();
                                                         continue;
                                                     }
@@ -348,17 +397,27 @@ fn run_bridge(
                                                     LinkLayer::None,
                                                 ) {
                                                     Ok(compressed) => {
-                                                        let schc_target = fixed_schc_peer.or(last_schc_sender);
+                                                        let schc_target =
+                                                            fixed_schc_peer.or(last_schc_sender);
                                                         let Some(target) = schc_target else {
-                                                            stats.schc_compress_fail.fetch_add(1, Ordering::Relaxed);
-                                                            println!("  No SCHC target available yet (set --schc-peer or wait for first SCHC RX)");
+                                                            stats
+                                                                .schc_compress_fail
+                                                                .fetch_add(1, Ordering::Relaxed);
+                                                            println!(
+                                                                "  No SCHC target available yet (set --schc-peer or wait for first SCHC RX)"
+                                                            );
                                                             println!();
                                                             continue;
                                                         };
 
-                                                        schc_socket.send_to(&compressed.data, target)?;
-                                                        stats.schc_compress_ok.fetch_add(1, Ordering::Relaxed);
-                                                        stats.schc_tx_packets.fetch_add(1, Ordering::Relaxed);
+                                                        schc_socket
+                                                            .send_to(&compressed.data, target)?;
+                                                        stats
+                                                            .schc_compress_ok
+                                                            .fetch_add(1, Ordering::Relaxed);
+                                                        stats
+                                                            .schc_tx_packets
+                                                            .fetch_add(1, Ordering::Relaxed);
                                                         println!(
                                                             "  Sent SCHC: {} bytes to {} (rule {}/{}, tx-dir={:?})",
                                                             compressed.data.len(),
@@ -368,20 +427,33 @@ fn run_bridge(
                                                             tx_direction
                                                         );
                                                         if verbose {
-                                                            println!("  SCHC bits: {}", compressed.bit_length);
-                                                            println!("  SCHC hex: {}", hex::encode(&compressed.data));
+                                                            println!(
+                                                                "  SCHC bits: {}",
+                                                                compressed.bit_length
+                                                            );
+                                                            println!(
+                                                                "  SCHC hex: {}",
+                                                                hex::encode(&compressed.data)
+                                                            );
                                                         }
                                                     }
                                                     Err(e) => {
-                                                        stats.schc_compress_fail.fetch_add(1, Ordering::Relaxed);
+                                                        stats
+                                                            .schc_compress_fail
+                                                            .fetch_add(1, Ordering::Relaxed);
                                                         println!("  Compress error: {:?}", e);
                                                     }
                                                 }
                                             }
                                             Err(e) => {
-                                                println!("  CoAP target {} failed: {}", coap_target, e);
+                                                println!(
+                                                    "  CoAP target {} failed: {}",
+                                                    coap_target, e
+                                                );
                                                 if coap_target.ip().is_loopback() {
-                                                    println!("  Hint: loopback target requires a local CoAP service listening on that host/port");
+                                                    println!(
+                                                        "  Hint: loopback target requires a local CoAP service listening on that host/port"
+                                                    );
                                                 }
                                             }
                                         }
@@ -397,11 +469,15 @@ fn run_bridge(
                 }
                 println!();
             }
-            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut => {}
+            Err(ref e)
+                if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut => {
+            }
             Err(e) => eprintln!("SCHC receive error: {}", e),
         }
 
-        if matches!(plain_mode, PlainMode::Coap) && matches!(coap_target_mode, CoapTargetMode::Packet) {
+        if matches!(plain_mode, PlainMode::Coap)
+            && matches!(coap_target_mode, CoapTargetMode::Packet)
+        {
             continue;
         }
 
@@ -447,7 +523,9 @@ fn run_bridge(
                         let schc_target = fixed_schc_peer.or(last_schc_sender);
                         let Some(target) = schc_target else {
                             stats.schc_compress_fail.fetch_add(1, Ordering::Relaxed);
-                            println!("  No SCHC target available yet (set --schc-peer or wait for first SCHC RX)");
+                            println!(
+                                "  No SCHC target available yet (set --schc-peer or wait for first SCHC RX)"
+                            );
                             println!();
                             continue;
                         };
@@ -475,7 +553,9 @@ fn run_bridge(
                 }
                 println!();
             }
-            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut => {}
+            Err(ref e)
+                if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut => {
+            }
             Err(e) => eprintln!("Plain receive error: {}", e),
         }
     }
@@ -548,7 +628,12 @@ fn parse_coap_target_mode(value: &str) -> io::Result<CoapTargetMode> {
 fn resolve_socket_addr(addr: &str, arg_name: &str) -> io::Result<SocketAddr> {
     let addrs: Vec<SocketAddr> = addr
         .to_socket_addrs()
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, format!("Invalid {} '{}': {}", arg_name, addr, e)))?
+        .map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("Invalid {} '{}': {}", arg_name, addr, e),
+            )
+        })?
         .collect();
     addrs.into_iter().next().ok_or_else(|| {
         io::Error::new(
@@ -568,8 +653,12 @@ fn load_rules(path: &str) -> io::Result<Vec<Rule>> {
     } else {
         println!("Loading JSON rules");
         let content = std::fs::read_to_string(path)?;
-        serde_json::from_str(&content)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("JSON parse error: {}", e)))
+        serde_json::from_str(&content).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("JSON parse error: {}", e),
+            )
+        })
     }
 }
 
@@ -577,7 +666,10 @@ fn build_ipv6_udp_response(request_packet: &[u8], coap_response: &[u8]) -> io::R
     if request_packet.len() < 48 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("Request packet too short for IPv6/UDP: {} bytes", request_packet.len()),
+            format!(
+                "Request packet too short for IPv6/UDP: {} bytes",
+                request_packet.len()
+            ),
         ));
     }
 
@@ -683,20 +775,32 @@ fn print_usage() {
     println!("  --plain-peer <ip:port>");
     println!();
     println!("Optional:");
-    println!("  --schc-peer <ip:port>      Fixed SCHC target (otherwise auto-reply to last SCHC sender)");
-    println!("  --plain-mode <coap|ipv6>   coap: plain side carries CoAP bytes; ipv6: carries full IPv6 packet");
-    println!("  --coap-target <packet|plain-peer>  for plain-mode=coap: packet=decompressed IPv6 dst/UDP port, plain-peer=configured --plain-peer");
-    println!("  --rules <path>             Rules file (.sor/.cbor/.json), default rules/base-ipv6-udp.sor");
+    println!(
+        "  --schc-peer <ip:port>      Fixed SCHC target (otherwise auto-reply to last SCHC sender)"
+    );
+    println!(
+        "  --plain-mode <coap|ipv6>   coap: plain side carries CoAP bytes; ipv6: carries full IPv6 packet"
+    );
+    println!(
+        "  --coap-target <packet|plain-peer>  for plain-mode=coap: packet=decompressed IPv6 dst/UDP port, plain-peer=configured --plain-peer"
+    );
+    println!(
+        "  --rules <path>             Rules file (.sor/.cbor/.json), default rules/base-ipv6-udp.sor"
+    );
     println!("  --rx-direction <up|down|auto>");
     println!("  --tx-direction <up|down>");
     println!("  -v, --verbose");
     println!();
     println!("Examples:");
     println!("  # Core role:");
-    println!("  cargo run --example udp_tunnel_interop -- --position core --plain-mode coap --coap-target packet --schc-listen 0.0.0.0:23628 --plain-listen 0.0.0.0:23629 --plain-peer 127.0.0.1:5683 --rules rules/docker1.sor -v");
+    println!(
+        "  cargo run --example udp_tunnel_interop -- --position core --plain-mode coap --coap-target packet --schc-listen 0.0.0.0:23628 --plain-listen 0.0.0.0:23629 --plain-peer 127.0.0.1:5683 --rules rules/docker1.sor -v"
+    );
     println!();
     println!("  # Device role:");
-    println!("  cargo run --example udp_tunnel_interop -- --position device --plain-mode coap --schc-listen 0.0.0.0:23628 --schc-peer 192.0.2.10:23628 --plain-listen 0.0.0.0:23629 --plain-peer 127.0.0.1:5683 --rules rules/docker1.sor -v");
+    println!(
+        "  cargo run --example udp_tunnel_interop -- --position device --plain-mode coap --schc-listen 0.0.0.0:23628 --schc-peer 192.0.2.10:23628 --plain-listen 0.0.0.0:23629 --plain-peer 127.0.0.1:5683 --rules rules/docker1.sor -v"
+    );
 }
 
 fn display_packet_structure(data: &[u8], verbose: bool) {
@@ -754,7 +858,11 @@ fn display_packet_structure(data: &[u8], verbose: bool) {
     }
 
     if verbose {
-        println!("  Full packet hex ({} bytes): {}", data.len(), hex::encode(data));
+        println!(
+            "  Full packet hex ({} bytes): {}",
+            data.len(),
+            hex::encode(data)
+        );
     }
 }
 
@@ -822,24 +930,34 @@ mod tests {
         let pkt = sample_request_packet();
         let dst = extract_udp_destination_from_packet(&pkt).expect("destination should parse");
         let expected_ip = Ipv6Addr::new(0x2001, 0x41d0, 0x0302, 0x2200, 0, 0, 0, 0x13b3);
-        assert_eq!(dst, SocketAddr::V6(SocketAddrV6::new(expected_ip, 5683, 0, 0)));
+        assert_eq!(
+            dst,
+            SocketAddr::V6(SocketAddrV6::new(expected_ip, 5683, 0, 0))
+        );
     }
 
     #[test]
     fn build_ipv6_udp_response_swaps_addrs_and_ports() {
         let req = sample_request_packet();
         let coap_response = [0x62, 0x45, 0x6f, 0x71, 0xa5, 0x1f, 0xff, 0x32, 0x30];
-        let rsp = build_ipv6_udp_response(&req, &coap_response).expect("response packet build should work");
+        let rsp = build_ipv6_udp_response(&req, &coap_response)
+            .expect("response packet build should work");
 
         assert_eq!(&rsp[0..4], &req[0..4]);
-        assert_eq!(u16::from_be_bytes([rsp[4], rsp[5]]), (8 + coap_response.len()) as u16);
+        assert_eq!(
+            u16::from_be_bytes([rsp[4], rsp[5]]),
+            (8 + coap_response.len()) as u16
+        );
         assert_eq!(rsp[6], req[6]);
         assert_eq!(rsp[7], req[7]);
         assert_eq!(&rsp[8..24], &req[24..40]);
         assert_eq!(&rsp[24..40], &req[8..24]);
         assert_eq!(&rsp[40..42], &req[42..44]);
         assert_eq!(&rsp[42..44], &req[40..42]);
-        assert_eq!(u16::from_be_bytes([rsp[44], rsp[45]]), (8 + coap_response.len()) as u16);
+        assert_eq!(
+            u16::from_be_bytes([rsp[44], rsp[45]]),
+            (8 + coap_response.len()) as u16
+        );
         assert_eq!(&rsp[48..], &coap_response);
     }
 }

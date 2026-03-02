@@ -6,7 +6,7 @@
 //! Per draft-toutain-schc-coreconf-management, M-Rules are pre-provisioned
 //! rules used exclusively for compressing CORECONF management traffic.
 
-use schc::{build_tree, compress_packet, decompress_packet, Direction, Rule, RuleSet};
+use schc::{Direction, Rule, RuleSet, build_tree, compress_packet, decompress_packet};
 
 use crate::error::{Error, Result};
 use crate::m_rules::MRuleSet;
@@ -49,8 +49,7 @@ impl MgmtCompressor {
                 if self.debug {
                     println!(
                         "Compressed with Rule {}/{}",
-                        compressed.rule_id,
-                        compressed.rule_id_length
+                        compressed.rule_id, compressed.rule_id_length
                     );
                 }
                 Ok(compressed.data)
@@ -76,8 +75,7 @@ impl MgmtCompressor {
                 if self.debug {
                     println!(
                         "Decompressed with Rule {}/{}",
-                        result.rule_id,
-                        result.rule_id_length
+                        result.rule_id, result.rule_id_length
                     );
                 }
                 Ok(result.full_data)

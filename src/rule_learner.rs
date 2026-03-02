@@ -6,7 +6,7 @@
 
 use schc::field_id::FieldId;
 use schc::rule::{CompressionAction, MatchingOperator, Rule};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::HashMap;
 
 /// Observed pattern for a single field
@@ -247,18 +247,22 @@ impl RuleLearner {
 fn bytes_to_json_value(bytes: &[u8], fid: FieldId) -> Value {
     // For IPv6 prefix fields, format as full IPv6 address with /64 notation
     // The parse_single_value function expects a string parseable by Ipv6Addr::parse()
-    if matches!(fid, FieldId::Ipv6DevPrefix | FieldId::Ipv6AppPrefix
-                   | FieldId::Ipv6SrcPrefix | FieldId::Ipv6DstPrefix) 
-        && bytes.len() == 8 {
-            // Format as full IPv6 address with trailing zeros: xxxx:xxxx:xxxx:xxxx::/64
-            // Using :: notation for the zero suffix to make it parse correctly
-            let prefix = format!(
-                "{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}::/64",
-                bytes[0], bytes[1], bytes[2], bytes[3],
-                bytes[4], bytes[5], bytes[6], bytes[7]
-            );
-            return json!(prefix);
-        }
+    if matches!(
+        fid,
+        FieldId::Ipv6DevPrefix
+            | FieldId::Ipv6AppPrefix
+            | FieldId::Ipv6SrcPrefix
+            | FieldId::Ipv6DstPrefix
+    ) && bytes.len() == 8
+    {
+        // Format as full IPv6 address with trailing zeros: xxxx:xxxx:xxxx:xxxx::/64
+        // Using :: notation for the zero suffix to make it parse correctly
+        let prefix = format!(
+            "{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}::/64",
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7]
+        );
+        return json!(prefix);
+    }
 
     // For IID fields and small values, use numeric representation (fits in u64)
     // This works well for both parse_tv() and for RPC byte conversion

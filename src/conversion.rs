@@ -6,7 +6,7 @@
 use schc::field_id::FieldId;
 use schc::parser::Direction;
 use schc::rule::{Field, MatchingOperator, Rule};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::error::{Error, Result};
 use crate::identities::{
@@ -203,7 +203,7 @@ fn yang_entry_to_field(entry: &Value) -> Result<Field> {
     let di_str = entry["direction-indicator"]
         .as_str()
         .unwrap_or("di-bidirectional");
-    
+
     let di = match di_str {
         "di-up" => Some(Direction::Up),
         "di-down" => Some(Direction::Down),
@@ -386,11 +386,7 @@ fn schc_tv_to_yang(tv: &Value) -> Result<Value> {
                         Value::Number(n) => {
                             let b = n.as_u64()?.to_be_bytes().to_vec();
                             let trimmed: Vec<u8> = b.into_iter().skip_while(|&x| x == 0).collect();
-                            if trimmed.is_empty() {
-                                vec![0]
-                            } else {
-                                trimmed
-                            }
+                            if trimmed.is_empty() { vec![0] } else { trimmed }
                         }
                         Value::String(s) => {
                             if let Some(hex) = s.strip_prefix("0x") {

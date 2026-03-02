@@ -35,14 +35,13 @@ use coap_lite::{MessageClass, MessageType, Packet, RequestType, ResponseType};
 use rust_coreconf::SidFile;
 use schc::field_id::FieldId;
 use schc::{
-    build_tree, compress_packet, display_tree, CompressionAction, Direction, MatchingOperator, Rule,
+    CompressionAction, Direction, MatchingOperator, Rule, build_tree, compress_packet, display_tree,
 };
 use schc_coreconf::{
-    load_sor_rules,
+    MRuleSet, SchcCoreconfManager, load_sor_rules,
     mgmt_compression::MgmtCompressor,
-    rpc_builder::{analyze_rpc_overhead, build_duplicate_rule_rpc, EntryModification},
+    rpc_builder::{EntryModification, analyze_rpc_overhead, build_duplicate_rule_rpc},
     sor_loader::{cda_to_sid, mo_to_sid},
-    MRuleSet, SchcCoreconfManager,
 };
 
 const M_RULES_PATH: &str = "samples/m-rules.sor";
@@ -217,7 +216,7 @@ impl DeviceState {
                         compressed.rule_id_length,
                         marker,
                     );
-                       println!(
+                    println!(
                         "{} (header) + {} (payload) bytes -> {}  bytes ({:.1}% header compression)",
                         packet.len() - 14,
                         payload.len(),
@@ -410,7 +409,7 @@ impl DeviceState {
 
         match response.header.code {
             MessageClass::Response(ResponseType::Changed) => {
-                println!("[CORECONF] Response: Changed");   
+                println!("[CORECONF] Response: Changed");
                 println!("[CORECONF] RPC successful!");
 
                 // Apply locally
@@ -512,7 +511,7 @@ impl DeviceState {
         let mgmt_tree = build_tree(&mgmt_rules);
         println!("\nManagement Rule Tree Structure:");
         display_tree(&mgmt_tree);
-        
+
         //Active rules tree
         let active_rules: Vec<Rule> = self
             .manager
